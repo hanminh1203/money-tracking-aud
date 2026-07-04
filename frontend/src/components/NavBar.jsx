@@ -3,6 +3,7 @@ const TABS = [
   { id: 'sources', label: 'Sources' },
   { id: 'add', label: 'Add Transaction' },
   { id: 'transfer', label: 'Transfer' },
+  { id: 'chat', label: 'Assistant' },
 ];
 
 export default function NavBar({ active, onChange, onRefresh, refreshing, onSignOut }) {

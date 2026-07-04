@@ -8,6 +8,7 @@ import TransferForm from './components/TransferForm';
 import { useGoogleAuth } from './hooks/useGoogleAuth';
 import { useFinanceData } from './hooks/useFinanceData';
 import { currentBalances } from './lib/transform';
+import ChatBot from './components/ChatBot';
 
 export default function App() {
   const { token, signedIn, gsiReady, error: authError, signIn, signOut } = useGoogleAuth();
@@ -48,6 +49,9 @@ export default function App() {
               <div className="flex justify-center">
                 <TransferForm metadata={metadata} balances={balances} token={token} onSaved={refresh} />
               </div>
+            )}
+            {tab === 'chat' && (
+              <ChatBot metadata={metadata} token={token} onSaved={refresh} />
             )}
           </>
         )}

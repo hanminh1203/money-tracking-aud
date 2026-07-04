@@ -44,6 +44,8 @@ jobs:
           VITE_CATEGORY_TABLE: Category
           VITE_SOURCES_TABLE: Sources
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          VITE_GROQ_API_KEY: ${{ secrets.VITE_GROQ_API_KEY }}
+          VITE_GROQ_MODEL: llama-3.3-70b-versatile
         run: npm run build
 
       - uses: actions/upload-pages-artifact@v3
