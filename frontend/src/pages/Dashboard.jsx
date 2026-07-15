@@ -1,23 +1,46 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Card from '../components/Card';
 import StatCard from '../components/StatCard';
 import NetWorthChart from '../components/NetWorthChart';
 import IncomeExpenseChart from '../components/IncomeExpenseChart';
 import CategoryDoughnut from '../components/CategoryDoughnut';
 import TransactionList from '../components/TransactionList';
-import { currentBalances, netWorthTrend, categoryBreakdown, compareTransactionsDesc } from '../lib/transform';
+import { getSpendingByCategory } from '../lib/api';
+import { currentBalances, netWorthTrend, compareTransactionsDesc } from '../lib/transform';
 
-export default function Dashboard({ transactions, monthlySummary }) {
+export default function Dashboard({ transactions, monthlySummary, listVersion }) {
   const [monthFilter, setMonthFilter] = useState('all');
+  const [breakdown, setBreakdown] = useState([]);
+  const [breakdownLoading, setBreakdownLoading] = useState(false);
+  const [breakdownError, setBreakdownError] = useState(null);
 
   const balances = useMemo(() => currentBalances(transactions), [transactions]);
   const netWorth = useMemo(() => Object.values(balances).reduce((s, b) => s + b, 0), [balances]);
   const trend = useMemo(() => netWorthTrend(transactions), [transactions]);
-  const breakdown = useMemo(() => categoryBreakdown(transactions, monthFilter), [transactions, monthFilter]);
   const recent = useMemo(
     () => transactions.slice().sort(compareTransactionsDesc).slice(0, 8),
     [transactions],
   );
+
+  useEffect(() => {
+    if (!listVersion) return;
+    const ac = new AbortController();
+    setBreakdownLoading(true);
+    setBreakdownError(null);
+    getSpendingByCategory(monthFilter, { signal: ac.signal })
+      .then((data) => {
+        setBreakdown(Array.isArray(data) ? data : []);
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return;
+        setBreakdown([]);
+        setBreakdownError(err.message || String(err));
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setBreakdownLoading(false);
+      });
+    return () => ac.abort();
+  }, [monthFilter, listVersion]);
 
   const latestMonth = monthlySummary[monthlySummary.length - 1];
 
@@ -63,7 +86,13 @@ export default function Dashboard({ transactions, monthlySummary }) {
             </select>
           }
         >
-          <CategoryDoughnut breakdown={breakdown} />
+          {breakdownError ? (
+            <div className="h-64 flex items-center justify-center text-expense text-sm">{breakdownError}</div>
+          ) : breakdownLoading ? (
+            <div className="h-64 flex items-center justify-center text-text-muted text-sm">Loading…</div>
+          ) : (
+            <CategoryDoughnut breakdown={breakdown} />
+          )}
         </Card>
       </div>
 

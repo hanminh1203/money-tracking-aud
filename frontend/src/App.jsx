@@ -37,13 +37,14 @@ export default function App() {
           </div>
         )}
 
-        {loading && transactions.length === 0 && !skipLoading ? (
+        {/* Avoid mounting routes until first load so Dashboard is not remounted mid-fetch. */}
+        {!skipLoading && listVersion === 0 && !error ? (
           <LoadingState />
         ) : (
           <Routes>
             <Route
               path="/"
-              element={<Dashboard transactions={transactions} monthlySummary={monthlySummary} />}
+              element={<Dashboard transactions={transactions} monthlySummary={monthlySummary} listVersion={listVersion} />}
             />
             <Route
               path="/sources"

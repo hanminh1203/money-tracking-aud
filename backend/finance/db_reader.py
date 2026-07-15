@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from django.db.models import Case, DecimalField, QuerySet, Sum, Value, When
-from django.db.models.functions import TruncMonth
+from django.db.models import Case, DecimalField, F, QuerySet, Sum, Value, When
+from django.db.models.functions import Abs, TruncMonth
 
 from finance.comment_parse import parse_store_comment
 from finance.models import Category, Receipt, Source, Transaction
@@ -147,6 +147,45 @@ def get_income_expense_by_month() -> list[dict]:
                 'month': f'{month_date.year}/{month_date.month:02d}',
                 'income': _dec_to_number(row['income'] or Decimal('0')),
                 'expense': _dec_to_number(row['expense'] or Decimal('0')),
+            }
+        )
+    return result
+
+
+def get_spending_by_category(month: str = 'all') -> list[dict]:
+    """Aggregate expense totals by main category for month='all' or 'YYYY/MM'.
+
+    Returns [{ category, amount }, ...] sorted by amount descending.
+    Amounts are absolute (positive). Uncategorized / non-Expense rows excluded.
+    """
+    month = (month or 'all').strip() or 'all'
+    qs = Transaction.objects.filter(category__type='Expense')
+
+    if month != 'all':
+        parts = month.split('/')
+        if len(parts) != 2:
+            raise ReaderError('month must be "all" or YYYY/MM', status=400)
+        try:
+            year = int(parts[0])
+            month_num = int(parts[1])
+        except ValueError as exc:
+            raise ReaderError('month must be "all" or YYYY/MM', status=400) from exc
+        if year < 1 or month_num < 1 or month_num > 12:
+            raise ReaderError('month must be "all" or YYYY/MM', status=400)
+        qs = qs.filter(date__year=year, date__month=month_num)
+
+    rows = (
+        qs.values('category__main_category')
+        .annotate(amount=Sum(Abs(F('change'))))
+        .order_by('-amount')
+    )
+    result = []
+    for row in rows:
+        name = (row['category__main_category'] or '').strip() or 'Other'
+        result.append(
+            {
+                'category': name,
+                'amount': _dec_to_number(row['amount'] or Decimal('0')),
             }
         )
     return result

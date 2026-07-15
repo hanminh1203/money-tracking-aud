@@ -112,20 +112,6 @@ export function netWorthTrend(transactions) {
   return Array.from(byDay.entries()).map(([date, total]) => ({ date, total }));
 }
 
-/** Expense breakdown by main category for a given month key ('YYYY/MM') or 'all'. */
-export function categoryBreakdown(transactions, monthFilter = 'all') {
-  const map = new Map();
-  for (const t of transactions) {
-    if (t.type !== 'Expense') continue;
-    if (monthFilter !== 'all' && monthKey(t.date) !== monthFilter) continue;
-    const key = t.mainCategory || 'Other';
-    map.set(key, (map.get(key) || 0) + Math.abs(t.change));
-  }
-  return Array.from(map.entries())
-    .map(([category, amount]) => ({ category, amount }))
-    .sort((a, b) => b.amount - a.amount);
-}
-
 /** Newest date first; newest creation_date first when dates match. */
 export function compareTransactionsDesc(a, b) {
   return (b.date - a.date) || ((b.creationDate || 0) - (a.creationDate || 0));

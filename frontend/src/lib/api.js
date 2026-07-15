@@ -5,11 +5,12 @@ function getCookie(name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-async function api(path, { method = 'GET', body, headers } = {}) {
+async function api(path, { method = 'GET', body, headers, signal } = {}) {
   const opts = {
     method,
     credentials: 'include',
     headers: { ...(headers || {}) },
+    signal,
   };
 
   if (body !== undefined) {
@@ -68,6 +69,11 @@ export function getMetadata() {
 
 export function getIncomeExpenseByMonth() {
   return api('/income-expense');
+}
+
+export function getSpendingByCategory(month = 'all', { signal } = {}) {
+  const params = new URLSearchParams({ month });
+  return api(`/spending-by-category?${params}`, { signal });
 }
 
 export function addTransaction(payload) {

@@ -23,6 +23,7 @@ from .db_reader import (
     get_income_expense_by_month as db_get_income_expense_by_month,
     get_metadata as db_get_metadata,
     get_receipt as db_get_receipt,
+    get_spending_by_category as db_get_spending_by_category,
     get_transaction_data,
 )
 from .db_sync import SyncError, compare_mirror, sync_from_sheets
@@ -187,6 +188,16 @@ def metadata(request: HttpRequest) -> JsonResponse:
 @require_auth
 def income_expense(request: HttpRequest) -> JsonResponse:
     return JsonResponse(db_get_income_expense_by_month(), safe=False)
+
+
+@require_GET
+@require_auth
+def spending_by_category(request: HttpRequest) -> JsonResponse:
+    month = request.GET.get('month', 'all')
+    try:
+        return JsonResponse(db_get_spending_by_category(month), safe=False)
+    except ReaderError as exc:
+        return json_error(str(exc), status=exc.status)
 
 
 @require_http_methods(['POST'])
