@@ -6,6 +6,8 @@ const TABLES = [
   { key: 'transactions', label: 'Transactions' },
   { key: 'receipt', label: 'Receipt' },
   { key: 'receipt_items', label: 'Receipt Items' },
+  { key: 'category', label: 'Category' },
+  { key: 'sources', label: 'Sources' },
 ];
 
 export default function Management() {
@@ -46,7 +48,7 @@ export default function Management() {
       const result = await syncManagement();
       const inserted = result?.inserted || {};
       setSyncMessage(
-        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items.`
+        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.category ?? 0} categories, ${inserted.sources ?? 0} sources.`
       );
       await loadStatus();
     } catch (err) {
@@ -102,7 +104,7 @@ export default function Management() {
 
       <OverallStatus status={overallStatus} checkedAt={loading ? null : data?.checked_at} />
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
         {TABLES.map(({ key, label }) => (
           <TableCard
             key={key}

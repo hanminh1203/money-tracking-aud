@@ -29,18 +29,21 @@ def _dec_to_number(value: Decimal) -> float:
 
 def get_transaction_data() -> dict:
     """Return sheet-shaped transaction rows from Postgres (no Main Category/Type)."""
-    qs = Transaction.objects.select_related('receipt').order_by('date', 'id')
+    qs = Transaction.objects.select_related('source', 'category', 'receipt').order_by(
+        '-date', '-creation_date'
+    )
     rows = []
-    for i, tx in enumerate(qs.iterator(), start=1):
+    for tx in qs.iterator():
         rows.append(
             {
                 'Date': tx.date.isoformat(),
                 'Change': _dec_to_number(tx.change),
-                'Source': tx.source,
+                'Source': tx.source.name if tx.source_id else '',
                 'Comment': tx.comment,
-                'Sub category': tx.sub_category,
+                'Sub category': tx.category.sub_category if tx.category_id else '',
                 'Receipt ID': str(tx.receipt_id) if tx.receipt_id else None,
-                '__row': i,
+                'Creation Date': tx.creation_date.isoformat() if tx.creation_date else None,
+                '__row': tx.row_number,
             }
         )
     return {'headers': list(TRANSACTION_HEADERS), 'rows': rows}
@@ -53,7 +56,11 @@ def get_receipt(receipt_id: str) -> dict:
         raise ReaderError('Receipt ID is required', status=400)
 
     try:
-        receipt = Receipt.objects.prefetch_related('items', 'transactions').get(pk=rid)
+        receipt = Receipt.objects.prefetch_related(
+            'items',
+            'transactions__source',
+            'transactions__category',
+        ).get(pk=rid)
     except (Receipt.DoesNotExist, ValueError) as exc:
         raise ReaderError('Receipt not found', status=404) from exc
 
@@ -74,12 +81,12 @@ def get_receipt(receipt_id: str) -> dict:
     for tx in receipt.transactions.all():
         sources.append(
             {
-                'source': tx.source,
+                'source': tx.source.name if tx.source_id else '',
                 'amount': abs(_dec_to_number(tx.change)),
             }
         )
-        if not sub_category:
-            sub_category = (tx.sub_category or '').strip()
+        if not sub_category and tx.category_id:
+            sub_category = (tx.category.sub_category or '').strip()
         if not store and not comment:
             store, comment = parse_store_comment(tx.comment or '')
 

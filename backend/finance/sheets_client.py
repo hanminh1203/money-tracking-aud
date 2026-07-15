@@ -243,38 +243,54 @@ class SheetsClient:
         return {'sources': sources, 'categories': categories}
 
     @staticmethod
+    def _parse_a1_start_row(a1_range: str) -> int:
+        """Extract the starting 1-based row from an A1 range like 'Sheet!A12:E14'."""
+        m = re.search(r'![A-Za-z]+(\d+)', a1_range or '')
+        if not m:
+            raise SheetsError(f'Could not parse sheet row from range: {a1_range!r}')
+        return int(m.group(1))
+
+    @staticmethod
     def _rows_as_dicts(table: dict, values: list[list]) -> list[dict]:
         headers = [c['name'] for c in table['columns']]
+        start_row = table['range']['startRowIndex'] + 2
         rows: list[dict] = []
-        for row in values:
+        for i, row in enumerate(values):
             if not row or all(c == '' or c is None for c in row):
                 continue
-            rows.append(
-                {h: (row[idx] if idx < len(row) else None) for idx, h in enumerate(headers)}
-            )
+            d = {h: (row[idx] if idx < len(row) else None) for idx, h in enumerate(headers)}
+            d['__sheet_row'] = start_row + i
+            rows.append(d)
         return rows
 
     def get_mirror_source_rows(self) -> dict[str, list[dict]]:
-        """Read Transactions, Receipt, and Receipt_Items tables as list-of-dicts."""
+        """Read mirror tables (Transactions, Receipt, Receipt_Items, Category, Sources)."""
         tx_table = self.get_table(settings.TRANSACTIONS_TABLE)
         receipt_table = self.get_table(settings.RECEIPT_TABLE)
         items_table = self.get_table(settings.RECEIPT_ITEMS_TABLE)
-        tx_vals, receipt_vals, item_vals = self.batch_get_values(
+        category_table = self.get_table(settings.CATEGORY_TABLE)
+        sources_table = self.get_table(settings.SOURCES_TABLE)
+        tx_vals, receipt_vals, item_vals, category_vals, sources_vals = self.batch_get_values(
             [
                 self.data_range_a1(tx_table),
                 self.data_range_a1(receipt_table),
                 self.data_range_a1(items_table),
+                self.data_range_a1(category_table),
+                self.data_range_a1(sources_table),
             ]
         )
         return {
             'transactions': self._rows_as_dicts(tx_table, tx_vals),
             'receipts': self._rows_as_dicts(receipt_table, receipt_vals),
             'receipt_items': self._rows_as_dicts(items_table, item_vals),
+            'categories': self._rows_as_dicts(category_table, category_vals),
+            'sources': self._rows_as_dicts(sources_table, sources_vals),
         }
 
-    def append_rows(self, table_name: str, column_names: list[str], rows: list[list]) -> None:
+    def append_rows(self, table_name: str, column_names: list[str], rows: list[list]) -> list[int]:
+        """Append rows; return 1-based sheet row numbers for each appended row."""
         if not rows:
-            return
+            return []
         table = self.get_table(table_name)
         col_index: dict[str, int] = {}
         for name in column_names:
@@ -304,15 +320,21 @@ class SheetsClient:
         append_range = (
             f"{quote_sheet_title(table['sheetTitle'])}!{start_col}{start_row}:{end_col}"
         )
-        self.request(
+        resp = self.request(
             f'/values/{requests.utils.quote(append_range, safe="")}'
             f':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS',
             method='POST',
             json_body={'values': ordered_rows},
         )
+        # Table metadata (end row) may have grown.
+        self._tables_cache = None
+        updated = (resp.get('updates') or {}).get('updatedRange') or ''
+        first_row = self._parse_a1_start_row(updated)
+        return list(range(first_row, first_row + len(ordered_rows)))
 
-    def append_transaction_row(self, values: list) -> None:
-        self.append_rows(settings.TRANSACTIONS_TABLE, INPUT_COLUMNS, [values])
+    def append_transaction_row(self, values: list) -> int:
+        row_numbers = self.append_rows(settings.TRANSACTIONS_TABLE, INPUT_COLUMNS, [values])
+        return row_numbers[0]
 
     def add_transaction(
         self,
@@ -333,13 +355,16 @@ class SheetsClient:
         if not source:
             raise SheetsError('Source is required')
         signed = -abs_amt if type == 'Expense' else abs_amt
-        self.append_transaction_row([date, signed, source, comment or '', sub_category or ''])
+        row_number = self.append_transaction_row(
+            [date, signed, source, comment or '', sub_category or '']
+        )
         db_writer.save_transaction(
             date=date,
             change=signed,
             source=source,
             comment=comment or '',
             sub_category=sub_category or '',
+            row_number=row_number,
         )
         return {'added': 1}
 
@@ -363,8 +388,12 @@ class SheetsClient:
         if from_source == to_source:
             raise SheetsError('Source and destination must differ')
         note = comment or 'Exchange'
-        self.append_transaction_row([date, -abs_amt, from_source, note, 'Exchange (self)'])
-        self.append_transaction_row([date, abs_amt, to_source, note, 'Exchange (self)'])
+        from_row = self.append_transaction_row(
+            [date, -abs_amt, from_source, note, 'Exchange (self)']
+        )
+        to_row = self.append_transaction_row(
+            [date, abs_amt, to_source, note, 'Exchange (self)']
+        )
         db_writer.save_transactions(
             [
                 {
@@ -373,6 +402,7 @@ class SheetsClient:
                     'source': from_source,
                     'comment': note,
                     'sub_category': 'Exchange (self)',
+                    'row_number': from_row,
                 },
                 {
                     'date': date,
@@ -380,6 +410,7 @@ class SheetsClient:
                     'source': to_source,
                     'comment': note,
                     'sub_category': 'Exchange (self)',
+                    'row_number': to_row,
                 },
             ]
         )
@@ -462,7 +493,7 @@ class SheetsClient:
                 for it in normalized_items
             ],
         )
-        self.append_rows(
+        tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
             RECEIPT_TX_COLUMNS,
             [
@@ -483,8 +514,9 @@ class SheetsClient:
                     'source': s['source'],
                     'comment': comment_text,
                     'sub_category': sub_category,
+                    'row_number': tx_row_numbers[i],
                 }
-                for s in normalized_sources
+                for i, s in enumerate(normalized_sources)
             ],
         )
 

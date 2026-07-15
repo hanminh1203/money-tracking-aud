@@ -56,6 +56,7 @@ export function normalizeRows(rows, categories = []) {
       return {
         row: r.__row,
         date: parseDate(r['Date']),
+        creationDate: parseDate(r['Creation Date'] || r.creationDate),
         change: parseAmount(r['Change']),
         source: String(r['Source'] || '').trim(),
         comment: String(r['Comment'] || '').trim(),
@@ -66,7 +67,7 @@ export function normalizeRows(rows, categories = []) {
       };
     })
     .filter((r) => r.date && r.source)
-    .sort((a, b) => a.date - b.date);
+    .sort((a, b) => (a.date - b.date) || ((a.creationDate || 0) - (b.creationDate || 0)));
 }
 
 /** Running balance per source, keyed by source name -> current balance. */
@@ -123,9 +124,9 @@ export function categoryBreakdown(transactions, monthFilter = 'all') {
     .sort((a, b) => b.amount - a.amount);
 }
 
-/** Newest date first; later sheet rows first when dates match. */
+/** Newest date first; newest creation_date first when dates match. */
 export function compareTransactionsDesc(a, b) {
-  return (b.date - a.date) || (b.row - a.row);
+  return (b.date - a.date) || ((b.creationDate || 0) - (a.creationDate || 0));
 }
 
 export function transactionsBySource(transactions, source) {
