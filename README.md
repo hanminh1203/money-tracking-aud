@@ -9,11 +9,12 @@ Browser (React SPA)
 Django API  ──  Google OAuth (auth code + refresh)
    │            Google Sheets API v4  (your spreadsheet)
    │            Groq (assistant + receipt OCR)
+   │            Postgres (local Docker; mirrors writes)
    ▼
 Named Sheets Tables (Transactions, Computed_Transactions, …)
 ```
 
-The frontend never talks to Sheets or Groq directly. Secrets (`GOOGLE_CLIENT_SECRET`, `GROQ_API_KEY`, sheet ID) stay on the server.
+The frontend never talks to Sheets or Groq directly. Secrets (`GOOGLE_CLIENT_SECRET`, `GROQ_API_KEY`, sheet ID) stay on the server. **Google Sheets remains the read source of truth**; Postgres dual-writes `Transactions`, `Receipt`, and `Receipt_Items` after successful sheet appends.
 
 ## Features
 
@@ -24,6 +25,18 @@ The frontend never talks to Sheets or Groq directly. Secrets (`GOOGLE_CLIENT_SEC
 - **Receipt scan** — vision OCR fills the receipt form
 
 ## Setup
+
+### 0. Postgres (local Docker)
+
+Local development needs Docker Desktop and a Postgres container:
+
+```bash
+docker compose up -d
+```
+
+Defaults match [`backend/.env.example`](backend/.env.example): user/password/db `finance` on `127.0.0.1:5432`.
+
+Or use [`start.bat`](start.bat), which starts the container, waits until it is healthy, runs `migrate`, then launches Django and Vite.
 
 ### 1. Google Cloud OAuth client
 
@@ -40,10 +53,12 @@ The frontend never talks to Sheets or Groq directly. Secrets (`GOOGLE_CLIENT_SEC
 cd backend
 cp .env.example .env
 # fill DJANGO_SECRET_KEY, GOOGLE_*, SHEET_ID, GROQ_API_KEY, …
+# Postgres defaults in .env.example match docker compose
 py -3 -m venv .venv
 .\.venv\Scripts\activate          # Windows
 # source .venv/bin/activate       # macOS/Linux
 pip install -r requirements.txt
+python manage.py migrate
 python manage.py runserver
 ```
 
@@ -82,11 +97,13 @@ One project for the whole repo. Root [`vercel.json`](vercel.json) defines two **
    - `CSRF_TRUSTED_ORIGINS=https://<domain>`
    - `DJANGO_DEBUG=false`
    - `ALLOWED_HOSTS=.vercel.app,<your-domain>`
+   - `POSTGRES_*` pointing at a reachable Postgres instance (required; local Docker defaults are not for production)
 3. Add the production redirect URI on the Google OAuth client.
 4. Deploy.
 
 ## Local architecture notes
 
-- Sessions use **signed cookies** (no database required for auth).
+- Sessions use **signed cookies** (no DB rows required for auth).
+- Postgres (Docker) stores mirrored **Transactions**, **Receipt**, and **Receipt_Items** rows (`id` UUID + `version` on every table; `Receipt.id` equals sheet `Receipt ID`). Sheets schema is unchanged.
 - CSRF: `GET /api/auth/me` sets the `csrftoken` cookie; the SPA sends `X-CSRFToken` on mutating requests.
 - Append-only writes — no edit/delete of existing sheet rows.

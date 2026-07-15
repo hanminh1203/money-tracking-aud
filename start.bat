@@ -24,6 +24,40 @@ if not exist "backend\.env" (
   exit /b 1
 )
 
+where docker >nul 2>nul
+if errorlevel 1 (
+  echo Docker is required for local Postgres. Install Docker Desktop and retry.
+  pause
+  exit /b 1
+)
+
+echo Starting Postgres container...
+docker compose up -d
+if errorlevel 1 (
+  echo Failed to start Postgres. Is Docker Desktop running?
+  pause
+  exit /b 1
+)
+
+echo Waiting for Postgres to be ready...
+:wait_pg
+docker compose exec -T db pg_isready -U finance -d finance >nul 2>nul
+if errorlevel 1 (
+  timeout /t 2 /nobreak >nul
+  goto wait_pg
+)
+
+echo Running database migrations...
+pushd backend
+call .venv\Scripts\python manage.py migrate
+if errorlevel 1 (
+  echo Migration failed.
+  popd
+  pause
+  exit /b 1
+)
+popd
+
 if not exist "frontend\node_modules\" (
   echo Installing frontend dependencies...
   pushd frontend
@@ -46,5 +80,5 @@ start "finance-dashboard-frontend" cmd /k "cd /d "%~dp0frontend" && npm run dev"
 echo.
 echo Both servers are starting in separate windows.
 echo Open the Vite URL shown in the frontend window (usually http://localhost:5173).
-echo Close those windows to stop the servers.
+echo Close those windows to stop the servers. Postgres keeps running via Docker.
 endlocal

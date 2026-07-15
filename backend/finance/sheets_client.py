@@ -9,6 +9,8 @@ from typing import Any
 import requests
 from django.conf import settings
 
+from finance import db_writer
+
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
 INPUT_COLUMNS = ['Date', 'Change', 'Source', 'Comment', 'Sub category']
@@ -307,6 +309,13 @@ class SheetsClient:
             raise SheetsError('Source is required')
         signed = -abs_amt if type == 'Expense' else abs_amt
         self.append_transaction_row([date, signed, source, comment or '', sub_category or ''])
+        db_writer.save_transaction(
+            date=date,
+            change=signed,
+            source=source,
+            comment=comment or '',
+            sub_category=sub_category or '',
+        )
         return {'added': 1}
 
     def add_transfer(
@@ -331,6 +340,24 @@ class SheetsClient:
         note = comment or 'Exchange'
         self.append_transaction_row([date, -abs_amt, from_source, note, 'Exchange (self)'])
         self.append_transaction_row([date, abs_amt, to_source, note, 'Exchange (self)'])
+        db_writer.save_transactions(
+            [
+                {
+                    'date': date,
+                    'change': -abs_amt,
+                    'source': from_source,
+                    'comment': note,
+                    'sub_category': 'Exchange (self)',
+                },
+                {
+                    'date': date,
+                    'change': abs_amt,
+                    'source': to_source,
+                    'comment': note,
+                    'sub_category': 'Exchange (self)',
+                },
+            ]
+        )
         return {'added': 2}
 
     def add_receipt(
@@ -415,6 +442,23 @@ class SheetsClient:
             RECEIPT_TX_COLUMNS,
             [
                 [date, -s['amount'], s['source'], comment_text, sub_category, receipt_id]
+                for s in normalized_sources
+            ],
+        )
+
+        db_writer.save_receipt_bundle(
+            receipt_id=receipt_id,
+            date=date,
+            total=total,
+            items=normalized_items,
+            transactions=[
+                {
+                    'date': date,
+                    'change': -s['amount'],
+                    'source': s['source'],
+                    'comment': comment_text,
+                    'sub_category': sub_category,
+                }
                 for s in normalized_sources
             ],
         )

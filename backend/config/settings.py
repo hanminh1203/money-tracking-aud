@@ -53,12 +53,16 @@ TEMPLATES = [
     },
 ]
 
-# No relational DB for finance data (Sheets is the source of truth).
-# Sqlite is only required so Django can boot; signed-cookie sessions need no DB.
+# Sheets remain the source of truth for reads. Postgres mirrors writes for
+# Transactions / Receipt / Receipt_Items (local Docker by default).
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'finance'),
+        'USER': os.environ.get('POSTGRES_USER', 'finance'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'finance'),
+        'HOST': os.environ.get('POSTGRES_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
 
