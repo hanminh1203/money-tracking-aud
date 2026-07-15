@@ -7,7 +7,7 @@ from decimal import Decimal
 from django.db.models import QuerySet
 
 from finance.comment_parse import parse_store_comment
-from finance.models import Receipt, Transaction
+from finance.models import Category, Receipt, Source, Transaction
 
 TRANSACTION_HEADERS = [
     'Date',
@@ -52,6 +52,23 @@ def _base_queryset(*, source: str | None = None) -> QuerySet[Transaction]:
     if name:
         qs = qs.filter(source__name=name)
     return qs
+
+
+def get_metadata() -> dict:
+    """Return sources and categories in the same shape as Sheets get_metadata."""
+    sources = [
+        {'name': s.name, 'type': s.type or ''}
+        for s in Source.objects.order_by('name')
+    ]
+    categories = [
+        {
+            'mainCategory': c.main_category,
+            'subCategory': c.sub_category,
+            'type': c.type or '',
+        }
+        for c in Category.objects.order_by('main_category', 'sub_category')
+    ]
+    return {'sources': sources, 'categories': categories}
 
 
 def get_transaction_data(

@@ -18,7 +18,12 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from . import oauth
-from .db_reader import ReaderError, get_receipt as db_get_receipt, get_transaction_data
+from .db_reader import (
+    ReaderError,
+    get_metadata as db_get_metadata,
+    get_receipt as db_get_receipt,
+    get_transaction_data,
+)
 from .db_sync import SyncError, compare_mirror, sync_from_sheets
 from .groq_client import GroqError, extract_receipt_from_image, parse_finance_message
 from .sheets_client import SheetsClient, SheetsError
@@ -174,11 +179,7 @@ def transactions(request: HttpRequest) -> JsonResponse:
 @require_GET
 @require_auth
 def metadata(request: HttpRequest) -> JsonResponse:
-    try:
-        data = sheets_for(request).get_metadata()
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 502)
-    return JsonResponse(data)
+    return JsonResponse(db_get_metadata())
 
 
 @require_GET
@@ -250,13 +251,12 @@ def assistant_parse(request: HttpRequest) -> JsonResponse:
             return json_error('message is required')
         metadata = body.get('metadata')
         if not metadata:
-            metadata = sheets_for(request).get_metadata()
+            metadata = db_get_metadata()
         result = parse_finance_message(message, metadata)
     except ValueError as exc:
         return json_error(str(exc))
-    except (SheetsError, GroqError) as exc:
-        status = getattr(exc, 'status', None) or 502
-        return json_error(str(exc), status=status)
+    except GroqError as exc:
+        return json_error(str(exc), status=502)
     return JsonResponse(result)
 
 
@@ -353,11 +353,10 @@ def receipt_ocr(request: HttpRequest) -> JsonResponse:
             return json_error('imageDataUrl is required')
         metadata = body.get('metadata')
         if not metadata:
-            metadata = sheets_for(request).get_metadata()
+            metadata = db_get_metadata()
         result = extract_receipt_from_image(image, metadata)
     except ValueError as exc:
         return json_error(str(exc))
-    except (SheetsError, GroqError) as exc:
-        status = getattr(exc, 'status', None) or 502
-        return json_error(str(exc), status=status)
+    except GroqError as exc:
+        return json_error(str(exc), status=502)
     return JsonResponse(result)
