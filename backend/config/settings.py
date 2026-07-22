@@ -112,5 +112,5 @@ GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 GROQ_MODEL = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
 GROQ_VISION_MODEL = os.environ.get(
     'GROQ_VISION_MODEL',
-    'meta-llama/llama-4-scout-17b-16e-instruct',
+    'qwen/qwen3.6-27b',
 )

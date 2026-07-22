@@ -135,7 +135,7 @@ $BackendDefaults = @{
   RECEIPT_ITEMS_TABLE       = 'Receipt_Items'
   GIFTCARD_TABLE            = 'Giftcard'
   GROQ_MODEL                = 'llama-3.3-70b-versatile'
-  GROQ_VISION_MODEL         = 'meta-llama/llama-4-scout-17b-16e-instruct'
+  GROQ_VISION_MODEL         = 'qwen/qwen3.6-27b'
 }
 
 # Frontend secrets — currently none (SPA has no VITE_* secrets).
