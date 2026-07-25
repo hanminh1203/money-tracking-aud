@@ -6,7 +6,7 @@ export default function Card({ children, className = '', title, action }) {
       {(title || action) && (
         <div className="flex items-center justify-between gap-3 mb-3.5">
           {title && (
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-[0.08em]">
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-[0.08em] leading-snug">
               {title}
             </h3>
           )}

@@ -28,7 +28,7 @@ export default function App() {
     <div className="min-h-screen">
       <NavBar onRefresh={refresh} refreshing={loading} onSignOut={signOut} />
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-6">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-6 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
         {error && (
           <div className="mb-5 p-4 rounded-xl border border-expense/30 bg-expense/5 text-expense text-sm">
             Failed to load data: {error}

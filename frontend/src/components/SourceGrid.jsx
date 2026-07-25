@@ -15,14 +15,14 @@ export default function SourceGrid({ balances, sourceTypes, onSelect, selected }
             key={source}
             type="button"
             onClick={() => onSelect(source)}
-            className={`text-left p-3.5 rounded-xl border transition-all duration-200 cursor-pointer active:scale-[0.99] ${
+            className={`text-left p-3.5 min-h-[5.5rem] rounded-xl border transition-all duration-200 cursor-pointer active:scale-[0.99] ${
               isActive
                 ? 'border-accent bg-accent-muted/60 shadow-card ring-1 ring-accent/20'
                 : 'border-bg-border bg-bg-surface hover:border-accent/35 hover:bg-bg-raised/60'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-sm font-medium text-text-primary truncate">{source}</span>
+            <div className="flex items-start justify-between gap-2 mb-2">
+              <span className="text-sm font-medium text-text-primary leading-snug line-clamp-2">{source}</span>
               {type && (
                 <span className="text-[10px] uppercase tracking-wide text-text-muted bg-bg-raised px-1.5 py-0.5 rounded shrink-0">
                   {TYPE_LABEL[type] || type}
@@ -30,7 +30,7 @@ export default function SourceGrid({ balances, sourceTypes, onSelect, selected }
               )}
             </div>
             <div
-              className={`text-lg font-semibold tabular-money ${
+              className={`text-base sm:text-lg font-semibold tabular-money ${
                 balance < 0 ? 'text-expense' : 'text-text-primary'
               }`}
             >

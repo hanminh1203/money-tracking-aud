@@ -66,7 +66,7 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
             type="button"
             key={t}
             onClick={() => { setType(t); setSubCategory(''); }}
-            className={`py-2 rounded-md text-sm font-medium transition-colors cursor-pointer ${
+            className={`min-h-11 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer ${
               type === t
                 ? t === 'Income' ? 'bg-income/20 text-income' : 'bg-expense/20 text-expense'
                 : 'text-text-secondary hover:text-text-primary'

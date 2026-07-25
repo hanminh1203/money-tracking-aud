@@ -15,7 +15,7 @@ export default function Modal({ title, onClose, children, maxWidth = 'max-w-lg' 
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fade-in">
       <button
         type="button"
         aria-label="Close dialog"
@@ -26,22 +26,25 @@ export default function Modal({ title, onClose, children, maxWidth = 'max-w-lg' 
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`relative w-full ${maxWidth} max-h-[90vh] flex flex-col rounded-xl border border-bg-border bg-bg-surface shadow-soft animate-fade-up`}
+        className={`relative w-full ${maxWidth} max-h-[92dvh] sm:max-h-[90vh] flex flex-col rounded-t-2xl sm:rounded-xl border border-bg-border bg-bg-surface shadow-soft animate-fade-up pb-safe`}
       >
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-bg-border shrink-0">
-          <h2 className="text-sm font-semibold text-text-primary tracking-tight">{title}</h2>
+        <div className="flex justify-center pt-2 sm:hidden" aria-hidden>
+          <div className="h-1 w-10 rounded-full bg-bg-border" />
+        </div>
+        <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3.5 sm:py-4 border-b border-bg-border shrink-0">
+          <h2 className="text-sm font-semibold text-text-primary tracking-tight truncate">{title}</h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="p-1.5 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-raised cursor-pointer transition-colors duration-200"
+            className="inline-flex items-center justify-center min-h-11 min-w-11 p-1.5 -mr-1.5 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-raised cursor-pointer transition-colors duration-200"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
-        <div className="overflow-y-auto p-5 scrollbar-thin">{children}</div>
+        <div className="overflow-y-auto overscroll-contain p-4 sm:p-5 scrollbar-thin">{children}</div>
       </div>
     </div>
   );

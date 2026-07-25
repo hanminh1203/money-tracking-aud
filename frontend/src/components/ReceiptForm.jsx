@@ -242,8 +242,11 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
           </div>
           <div className="space-y-2">
             {sources.map((s, i) => (
-              <div key={i} className="grid grid-cols-[1fr_7rem_auto] gap-2 items-end">
-                <Field label={i === 0 ? 'Source' : undefined}>
+              <div
+                key={i}
+                className="grid grid-cols-1 min-[400px]:grid-cols-[1fr_7rem_auto] gap-2 items-stretch min-[400px]:items-end rounded-lg border border-bg-border/60 p-3 min-[400px]:border-0 min-[400px]:p-0"
+              >
+                <Field label="Source">
                   <select
                     value={s.source}
                     onChange={(e) => updateSource(i, { source: e.target.value })}
@@ -260,7 +263,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                     ))}
                   </select>
                 </Field>
-                <Field label={i === 0 ? 'Amount' : undefined}>
+                <Field label="Amount">
                   <input
                     type="number"
                     inputMode="decimal"
@@ -278,9 +281,11 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                   disabled={sources.length === 1}
                   onClick={() => setSources((prev) => prev.filter((_, j) => j !== i))}
                   aria-label="Remove source"
-                  className="mb-0.5 p-2.5 rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                  className="inline-flex items-center justify-center min-h-11 min-w-11 self-end justify-self-end rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  ✕
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
                 </button>
               </div>
             ))}
@@ -302,9 +307,9 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
             {items.map((it, i) => (
               <div
                 key={i}
-                className="grid grid-cols-[1fr_5rem_5.5rem_6rem_auto] gap-2 items-end"
+                className="grid grid-cols-2 sm:grid-cols-[1fr_5rem_5.5rem_6rem_auto] gap-2 items-end rounded-lg border border-bg-border/60 p-3 sm:border-0 sm:p-0"
               >
-                <Field label={i === 0 ? 'Name' : undefined}>
+                <Field label="Name" className="col-span-2 sm:col-span-1">
                   <input
                     type="text"
                     placeholder="Item name"
@@ -314,7 +319,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                     required
                   />
                 </Field>
-                <Field label={i === 0 ? 'Amount' : undefined}>
+                <Field label="Amount">
                   <input
                     type="number"
                     inputMode="decimal"
@@ -326,7 +331,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                     className={inputClass}
                   />
                 </Field>
-                <Field label={i === 0 ? 'Unit' : undefined}>
+                <Field label="Unit">
                   <select
                     value={it.unit}
                     onChange={(e) => updateItem(i, { unit: e.target.value })}
@@ -340,7 +345,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                     ))}
                   </select>
                 </Field>
-                <Field label={i === 0 ? 'Money' : undefined}>
+                <Field label="Money">
                   <input
                     type="number"
                     inputMode="decimal"
@@ -358,9 +363,11 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                   disabled={items.length === 1}
                   onClick={() => setItems((prev) => prev.filter((_, j) => j !== i))}
                   aria-label="Remove item"
-                  className="mb-0.5 p-2.5 rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                  className="col-span-2 sm:col-span-1 inline-flex items-center justify-center min-h-11 min-w-11 sm:self-end sm:justify-self-end rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  ✕
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
                 </button>
               </div>
             ))}
@@ -380,7 +387,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
           </p>
         )}
 
-        <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+        <div className="flex flex-wrap items-center justify-end gap-2 pt-1 [&_button]:flex-1 sm:[&_button]:flex-none">
           <button type="button" onClick={() => onClose?.()} className={cancelClass}>
             Cancel
           </button>
@@ -396,7 +403,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
             type="submit"
             disabled={!canSubmit}
             onClick={() => { closeAfterRef.current = true; }}
-            className={primaryClass}
+            className={`${primaryClass} basis-full sm:basis-auto`}
           >
             {submitting ? 'Saving…' : 'Submit and Close'}
           </button>
