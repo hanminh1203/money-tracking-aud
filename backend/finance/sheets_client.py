@@ -108,11 +108,12 @@ def quote_sheet_title(title: str) -> str:
 
 
 class SheetsClient:
-    def __init__(self, access_token: str):
+    def __init__(self, access_token: str, sheet_id: str, user=None):
         self.token = access_token
-        self.sheet_id = settings.SHEET_ID
+        self.sheet_id = (sheet_id or '').strip()
         if not self.sheet_id:
-            raise SheetsError('SHEET_ID is not configured')
+            raise SheetsError('Sheet ID is not configured for this user')
+        self.user = user
         self._tables_cache: dict[str, dict] | None = None
 
     def _headers(self) -> dict[str, str]:
@@ -460,27 +461,21 @@ class SheetsClient:
         return rows
 
     def get_mirror_source_rows(self) -> dict[str, list[dict]]:
-        """Read mirror tables (Transactions, Receipt, Receipt_Items, Category, Sources, Giftcard)."""
+        """Read user-owned mirror tables (Transactions, Receipt, Receipt_Items, Giftcard)."""
         tx_table = self.get_table(settings.TRANSACTIONS_TABLE)
         receipt_table = self.get_table(settings.RECEIPT_TABLE)
         items_table = self.get_table(settings.RECEIPT_ITEMS_TABLE)
-        category_table = self.get_table(settings.CATEGORY_TABLE)
-        sources_table = self.get_table(settings.SOURCES_TABLE)
         giftcard_table = self.get_table(settings.GIFTCARD_TABLE)
         (
             tx_vals,
             receipt_vals,
             item_vals,
-            category_vals,
-            sources_vals,
             giftcard_vals,
         ) = self.batch_get_values(
             [
                 self.data_range_a1(tx_table),
                 self.data_range_a1(receipt_table),
                 self.data_range_a1(items_table),
-                self.data_range_a1(category_table),
-                self.data_range_a1(sources_table),
                 self.data_range_a1(giftcard_table),
             ]
         )
@@ -488,8 +483,6 @@ class SheetsClient:
             'transactions': self._rows_as_dicts(tx_table, tx_vals),
             'receipts': self._rows_as_dicts(receipt_table, receipt_vals),
             'receipt_items': self._rows_as_dicts(items_table, item_vals),
-            'categories': self._rows_as_dicts(category_table, category_vals),
-            'sources': self._rows_as_dicts(sources_table, sources_vals),
             'giftcards': self._rows_as_dicts(giftcard_table, giftcard_vals),
         }
 
@@ -621,6 +614,7 @@ class SheetsClient:
             [date, signed, source, comment or '', sub_category or '']
         )
         db_writer.save_transaction(
+            user=self.user,
             date=date,
             change=signed,
             source=source,
@@ -674,7 +668,8 @@ class SheetsClient:
                     'sub_category': 'Exchange (self)',
                     'row_number': to_row,
                 },
-            ]
+            ],
+            user=self.user,
         )
         return {'added': 2}
 
@@ -765,6 +760,7 @@ class SheetsClient:
         )
 
         db_writer.save_receipt_bundle(
+            user=self.user,
             receipt_id=receipt_id,
             date=date,
             total=total,
@@ -841,6 +837,7 @@ class SheetsClient:
         )
 
         db_writer.save_giftcard_purchase(
+            user=self.user,
             giftcard_id=giftcard_id,
             shop=shop_name,
             date=date,
@@ -897,7 +894,7 @@ class SheetsClient:
             raise SheetsError('Invalid amount')
 
         try:
-            card = Giftcard.objects.get(pk=gid)
+            card = Giftcard.objects.get(pk=gid, user=self.user)
         except (Giftcard.DoesNotExist, ValueError) as exc:
             raise SheetsError('Giftcard not found', status=404) from exc
 
@@ -924,6 +921,7 @@ class SheetsClient:
         )
 
         db_writer.save_giftcard_use(
+            user=self.user,
             giftcard_id=gid,
             new_balance=new_balance,
             date=date,

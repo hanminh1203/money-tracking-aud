@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import NavBar from './components/NavBar';
 import SignInScreen from './components/SignInScreen';
@@ -15,10 +15,16 @@ import ChatBot from './components/ChatBot';
 
 export default function App() {
   const { signedIn, ready, error: authError, signIn, signOut } = useAuth();
-  const { transactions, metadata, dashboard, loading, error, refresh, listVersion } = useFinanceData(signedIn);
+  const { transactions, metadata, dashboard, error, refresh, listVersion } = useFinanceData(signedIn);
   const { pathname } = useLocation();
   const balances = useMemo(() => currentBalances(transactions), [transactions]);
   const skipLoading = pathname === '/health' || pathname === '/management';
+
+  useEffect(() => {
+    if (!signedIn) return;
+    if (pathname === '/health' || pathname === '/management') return;
+    refresh();
+  }, [pathname, refresh, signedIn]);
 
   if (!signedIn) {
     return <SignInScreen onSignIn={signIn} error={authError} ready={ready} />;
@@ -26,7 +32,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <NavBar onRefresh={refresh} refreshing={loading} onSignOut={signOut} />
+      <NavBar onSignOut={signOut} />
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-6 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
         {error && (

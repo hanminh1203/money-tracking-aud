@@ -113,7 +113,6 @@ $BackendSecrets = @(
   @{ Name = 'DJANGO_SECRET_KEY'; Prompt = 'Django secret key (session/CSRF signing)'; GenerateIfEmpty = $true }
   @{ Name = 'GOOGLE_CLIENT_ID'; Prompt = 'Google OAuth Client ID' }
   @{ Name = 'GOOGLE_CLIENT_SECRET'; Prompt = 'Google OAuth Client Secret' }
-  @{ Name = 'SHEET_ID'; Prompt = 'Google Spreadsheet ID (from /d/<id>/edit URL)' }
   @{ Name = 'GROQ_API_KEY'; Prompt = 'Groq API key (assistant + receipt OCR)' }
 )
 

@@ -145,3 +145,11 @@ export function syncManagement() {
 export function exportManagement() {
   return api('/management/export', { method: 'POST' });
 }
+
+export function fetchManagementSettings() {
+  return api('/management/settings');
+}
+
+export function saveManagementSettings({ sheetId }) {
+  return api('/management/settings', { method: 'PUT', body: { sheetId } });
+}

@@ -11,7 +11,7 @@ from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
 from finance.comment_parse import parse_store_comment
-from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction
+from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction, User
 
 TRANSACTION_HEADERS = [
     'Date',
@@ -82,9 +82,11 @@ def _shift_month(value: date, offset: int) -> date:
     return date(month_index // 12, month_index % 12 + 1, 1)
 
 
-def _base_queryset(*, source: str | None = None) -> QuerySet[Transaction]:
-    qs = Transaction.objects.select_related('source', 'category', 'receipt').order_by(
-        '-date', '-creation_date'
+def _base_queryset(*, user: User, source: str | None = None) -> QuerySet[Transaction]:
+    qs = (
+        Transaction.objects.filter(user=user)
+        .select_related('source', 'category', 'receipt')
+        .order_by('-date', '-creation_date')
     )
     name = (source or '').strip()
     if name:
@@ -111,6 +113,7 @@ def get_metadata() -> dict:
 
 def get_transaction_data(
     *,
+    user: User,
     page: int | None = None,
     source: str | None = None,
 ) -> dict:
@@ -119,7 +122,7 @@ def get_transaction_data(
     Without page: all matching rows for pages that need a complete history.
     With page: LIMIT/OFFSET using backend DEFAULT_PAGE_SIZE, plus total count.
     """
-    qs = _base_queryset(source=source)
+    qs = _base_queryset(user=user, source=source)
     headers = list(TRANSACTION_HEADERS)
 
     if page is None:
@@ -144,7 +147,7 @@ def get_transaction_data(
     }
 
 
-def get_dashboard_data() -> dict:
+def get_dashboard_data(*, user: User) -> dict:
     """Return all dashboard metrics, breakdowns, and current-month rows."""
     current_month = timezone.localdate().replace(day=1)
     first_month = _shift_month(current_month, -2)
@@ -153,7 +156,8 @@ def get_dashboard_data() -> dict:
     months = [f'{value.year}/{value.month:02d}' for value in month_dates]
 
     zero = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
-    current_qs = Transaction.objects.filter(
+    user_txs = Transaction.objects.filter(user=user)
+    current_qs = user_txs.filter(
         date__gte=current_month,
         date__lt=next_month,
     )
@@ -175,10 +179,10 @@ def get_dashboard_data() -> dict:
     )
     income = totals['income'] or Decimal('0')
     expense = totals['expense'] or Decimal('0')
-    net_worth = Transaction.objects.aggregate(total=Sum('change'))['total'] or Decimal('0')
+    net_worth = user_txs.aggregate(total=Sum('change'))['total'] or Decimal('0')
 
     breakdown_rows = (
-        Transaction.objects.filter(
+        user_txs.filter(
             date__gte=first_month,
             date__lt=next_month,
             category__type__in=('Income', 'Expense'),
@@ -230,18 +234,22 @@ def get_dashboard_data() -> dict:
     }
 
 
-def get_receipt(receipt_id: str) -> dict:
+def get_receipt(*, user: User, receipt_id: str) -> dict:
     """Return receipt detail in the same shape as the former Sheets get_receipt."""
     rid = str(receipt_id or '').strip()
     if not rid:
         raise ReaderError('Receipt ID is required', status=400)
 
     try:
-        receipt = Receipt.objects.prefetch_related(
-            'items',
-            'transactions__source',
-            'transactions__category',
-        ).get(pk=rid)
+        receipt = (
+            Receipt.objects.filter(user=user)
+            .prefetch_related(
+                'items',
+                'transactions__source',
+                'transactions__category',
+            )
+            .get(pk=rid)
+        )
     except (Receipt.DoesNotExist, ValueError) as exc:
         raise ReaderError('Receipt not found', status=404) from exc
 
@@ -283,7 +291,7 @@ def get_receipt(receipt_id: str) -> dict:
     }
 
 
-def get_giftcards() -> list[dict]:
+def get_giftcards(*, user: User) -> list[dict]:
     """Return giftcards with balance > 0, ordered by date desc then shop asc."""
     return [
         {
@@ -292,11 +300,11 @@ def get_giftcards() -> list[dict]:
             'date': g.date.isoformat(),
             'balance': _dec_to_number(g.balance),
         }
-        for g in Giftcard.objects.filter(balance__gt=0).order_by('-date', 'shop')
+        for g in Giftcard.objects.filter(user=user, balance__gt=0).order_by('-date', 'shop')
     ]
 
 
-def get_export_payload() -> dict[str, dict]:
+def get_export_payload(*, user: User) -> dict[str, dict]:
     """Return sheet-shaped value matrices for a full workbook export.
 
     Keys match management count labels. Each entry has:
@@ -312,7 +320,8 @@ def get_export_payload() -> dict[str, dict]:
             str(tx.receipt_id) if tx.receipt_id else '',
             str(tx.giftcard_id) if tx.giftcard_id else '',
         ]
-        for tx in Transaction.objects.select_related('source', 'category')
+        for tx in Transaction.objects.filter(user=user)
+        .select_related('source', 'category')
         .order_by('row_number')
         .iterator()
     ]
@@ -324,12 +333,12 @@ def get_export_payload() -> dict[str, dict]:
             g.date.isoformat(),
             _dec_cell(g.balance),
         ]
-        for g in Giftcard.objects.order_by('row_number').iterator()
+        for g in Giftcard.objects.filter(user=user).order_by('row_number').iterator()
     ]
 
     receipts = [
         [str(r.id), r.date.isoformat(), _dec_cell(r.total)]
-        for r in Receipt.objects.order_by('id').iterator()
+        for r in Receipt.objects.filter(user=user).order_by('id').iterator()
     ]
 
     receipt_items = [
@@ -340,7 +349,9 @@ def get_export_payload() -> dict[str, dict]:
             it.unit or '',
             _dec_cell(it.money),
         ]
-        for it in ReceiptItem.objects.order_by('receipt_id', 'id').iterator()
+        for it in ReceiptItem.objects.filter(user=user)
+        .order_by('receipt_id', 'id')
+        .iterator()
     ]
 
     categories = [
