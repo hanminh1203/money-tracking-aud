@@ -23,6 +23,7 @@ from . import oauth
 from .db_reader import (
     ReaderError,
     get_dashboard_data,
+    get_export_payload,
     get_giftcards as db_get_giftcards,
     get_metadata as db_get_metadata,
     get_receipt as db_get_receipt,
@@ -383,6 +384,20 @@ def management_sync(request: HttpRequest) -> JsonResponse:
         result = sync_from_sheets(sheets_for(request))
     except SyncError as exc:
         return json_error(str(exc))
+    except SheetsError as exc:
+        status = getattr(exc, 'status', None) or 502
+        return json_error(str(exc), status=status)
+    return JsonResponse(result)
+
+
+@require_POST
+@require_auth
+def management_export(request: HttpRequest) -> JsonResponse:
+    """Create a new Google Sheet from Postgres mirror tables."""
+    try:
+        payload = get_export_payload()
+        title = f"Finance Export {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
+        result = sheets_for(request).export_workbook(title, payload)
     except SheetsError as exc:
         status = getattr(exc, 'status', None) or 502
         return json_error(str(exc), status=status)

@@ -141,3 +141,7 @@ export function fetchManagementStatus() {
 export function syncManagement() {
   return api('/management/sync', { method: 'POST' });
 }
+
+export function exportManagement() {
+  return api('/management/export', { method: 'POST' });
+}

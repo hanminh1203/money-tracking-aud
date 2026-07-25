@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Card from '../components/Card';
 import PageHeader from '../components/PageHeader';
-import { fetchManagementStatus, syncManagement } from '../lib/api';
+import { exportManagement, fetchManagementStatus, syncManagement } from '../lib/api';
 
 const TABLES = [
   { key: 'transactions', label: 'Transactions' },
@@ -16,8 +16,10 @@ export default function Management() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState(null);
   const [syncMessage, setSyncMessage] = useState(null);
+  const [exportResult, setExportResult] = useState(null);
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -60,18 +62,38 @@ export default function Management() {
     }
   };
 
-  const busy = loading || syncing;
+  const handleExport = async () => {
+    setExporting(true);
+    setError(null);
+    setExportResult(null);
+    try {
+      const result = await exportManagement();
+      setExportResult(result);
+      if (result?.url) {
+        window.open(result.url, '_blank', 'noopener,noreferrer');
+      }
+    } catch (err) {
+      setError(err.message || 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const busy = loading || syncing || exporting;
   const overallStatus = loading ? 'checking' : data?.matched ? 'ok' : 'mismatch';
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Management"
-        description="Compare Google Sheet mirror tables with Postgres, and sync when they drift."
+        description="Compare Google Sheet mirror tables with Postgres, sync when they drift, or export Postgres to a new sheet."
         action={
           <>
             <button type="button" onClick={loadStatus} disabled={busy} className="btn-secondary">
               {loading ? 'Checking…' : 'Refresh status'}
+            </button>
+            <button type="button" onClick={handleExport} disabled={busy} className="btn-secondary">
+              {exporting ? 'Exporting…' : 'Export to Google Sheet'}
             </button>
             <button type="button" onClick={handleSync} disabled={busy} className="btn-primary">
               {syncing ? 'Syncing…' : 'Sync'}
@@ -89,6 +111,31 @@ export default function Management() {
       {syncMessage && (
         <div className="p-4 rounded-xl border border-income/30 bg-income/5 text-income text-sm">
           {syncMessage}
+        </div>
+      )}
+
+      {exportResult && (
+        <div className="p-4 rounded-xl border border-income/30 bg-income/5 text-income text-sm space-y-1">
+          <p>
+            Exported {exportResult.counts?.transactions ?? 0} transactions,{' '}
+            {exportResult.counts?.receipt ?? 0} receipts,{' '}
+            {exportResult.counts?.receipt_items ?? 0} receipt items,{' '}
+            {exportResult.counts?.giftcards ?? 0} giftcards,{' '}
+            {exportResult.counts?.category ?? 0} categories,{' '}
+            {exportResult.counts?.sources ?? 0} sources.
+          </p>
+          {exportResult.url && (
+            <p>
+              <a
+                href={exportResult.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-medium"
+              >
+                Open exported Google Sheet
+              </a>
+            </p>
+          )}
         </div>
       )}
 

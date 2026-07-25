@@ -5,12 +5,13 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from django.conf import settings
 from django.db.models import Case, DecimalField, QuerySet, Sum, Value, When
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
 from finance.comment_parse import parse_store_comment
-from finance.models import Category, Giftcard, Receipt, Source, Transaction
+from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction
 
 TRANSACTION_HEADERS = [
     'Date',
@@ -22,7 +23,18 @@ TRANSACTION_HEADERS = [
     'Giftcard ID',
 ]
 
+CATEGORY_EXPORT_COLUMNS = ['Main Category', 'Sub category', 'Type']
+SOURCES_EXPORT_COLUMNS = ['Name', 'Type']
+RECEIPT_EXPORT_COLUMNS = ['Receipt ID', 'Date', 'Total']
+RECEIPT_ITEM_EXPORT_COLUMNS = ['Receipt ID', 'Name', 'Amount', 'Unit', 'Money']
+GIFTCARD_EXPORT_COLUMNS = ['Giftcard ID', 'Shop', 'Date', 'Balance']
+
 DEFAULT_PAGE_SIZE = 10
+
+
+def _dec_cell(value: Decimal) -> str:
+    """Format decimals as plain numeric strings for Sheets USER_ENTERED."""
+    return format(value.normalize(), 'f')
 
 
 class ReaderError(Exception):
@@ -282,3 +294,94 @@ def get_giftcards() -> list[dict]:
         }
         for g in Giftcard.objects.filter(balance__gt=0).order_by('-date', 'shop')
     ]
+
+
+def get_export_payload() -> dict[str, dict]:
+    """Return sheet-shaped value matrices for a full workbook export.
+
+    Keys match management count labels. Each entry has:
+    ``columns`` (header names) and ``rows`` (list of cell lists, no header row).
+    """
+    transactions = [
+        [
+            tx.date.isoformat(),
+            _dec_cell(tx.change),
+            tx.source.name if tx.source_id else '',
+            tx.comment or '',
+            tx.category.sub_category if tx.category_id else '',
+            str(tx.receipt_id) if tx.receipt_id else '',
+            str(tx.giftcard_id) if tx.giftcard_id else '',
+        ]
+        for tx in Transaction.objects.select_related('source', 'category')
+        .order_by('row_number')
+        .iterator()
+    ]
+
+    giftcards = [
+        [
+            str(g.id),
+            g.shop or '',
+            g.date.isoformat(),
+            _dec_cell(g.balance),
+        ]
+        for g in Giftcard.objects.order_by('row_number').iterator()
+    ]
+
+    receipts = [
+        [str(r.id), r.date.isoformat(), _dec_cell(r.total)]
+        for r in Receipt.objects.order_by('id').iterator()
+    ]
+
+    receipt_items = [
+        [
+            str(it.receipt_id),
+            it.name or '',
+            _dec_cell(it.amount),
+            it.unit or '',
+            _dec_cell(it.money),
+        ]
+        for it in ReceiptItem.objects.order_by('receipt_id', 'id').iterator()
+    ]
+
+    categories = [
+        [c.main_category or '', c.sub_category or '', c.type or '']
+        for c in Category.objects.order_by('main_category', 'sub_category').iterator()
+    ]
+
+    sources = [
+        [s.name or '', s.type or '']
+        for s in Source.objects.order_by('name').iterator()
+    ]
+
+    return {
+        'transactions': {
+            'table_name': settings.TRANSACTIONS_TABLE,
+            'columns': list(TRANSACTION_HEADERS),
+            'rows': transactions,
+        },
+        'giftcards': {
+            'table_name': settings.GIFTCARD_TABLE,
+            'columns': list(GIFTCARD_EXPORT_COLUMNS),
+            'rows': giftcards,
+        },
+        'receipt': {
+            'table_name': settings.RECEIPT_TABLE,
+            'columns': list(RECEIPT_EXPORT_COLUMNS),
+            'rows': receipts,
+        },
+        'receipt_items': {
+            'table_name': settings.RECEIPT_ITEMS_TABLE,
+            'columns': list(RECEIPT_ITEM_EXPORT_COLUMNS),
+            'rows': receipt_items,
+        },
+        'category': {
+            'table_name': settings.CATEGORY_TABLE,
+            'columns': list(CATEGORY_EXPORT_COLUMNS),
+            'rows': categories,
+        },
+        'sources': {
+            'table_name': settings.SOURCES_TABLE,
+            'columns': list(SOURCES_EXPORT_COLUMNS),
+            'rows': sources,
+        },
+    }
