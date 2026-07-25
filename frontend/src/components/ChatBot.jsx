@@ -82,12 +82,12 @@ export default function ChatBot({ metadata, onSaved }) {
         title="Assistant"
         description="Describe a purchase or transfer in plain language and I will log it."
       />
-      <Card title="Conversation" className="flex flex-col h-[70vh]">
-        <div className="flex-1 overflow-y-auto scrollbar-thin space-y-3 pr-1">
+      <Card title="Conversation" className="flex flex-col h-[min(70dvh,32rem)] sm:h-[70vh]">
+        <div className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin space-y-3 pr-1">
           {messages.map((m, i) => (
             <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div
-                className={`max-w-[85%] px-3.5 py-2.5 rounded-xl text-sm whitespace-pre-wrap ${
+                className={`max-w-[85%] px-3.5 py-2.5 rounded-xl text-sm whitespace-pre-wrap break-words ${
                   m.role === 'user'
                     ? 'bg-accent text-white'
                     : m.error
@@ -109,16 +109,16 @@ export default function ChatBot({ metadata, onSaved }) {
           <div ref={bottomRef} />
         </div>
 
-        <form onSubmit={handleSend} className="mt-4 flex gap-2">
+        <form onSubmit={handleSend} className="mt-4 flex flex-col min-[400px]:flex-row gap-2">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="e.g. Paid $32 for coffee with Cash yesterday"
-            className={`${inputClass} flex-1`}
+            className={`${inputClass} flex-1 min-w-0`}
             disabled={busy}
           />
-          <button type="submit" disabled={busy || !input.trim()} className="btn-primary shrink-0">
+          <button type="submit" disabled={busy || !input.trim()} className="btn-primary shrink-0 w-full min-[400px]:w-auto">
             Send
           </button>
         </form>

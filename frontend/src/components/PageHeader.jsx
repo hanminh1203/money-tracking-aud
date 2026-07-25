@@ -7,7 +7,11 @@ export default function PageHeader({ title, description, action }) {
           <p className="text-sm text-text-secondary mt-1 max-w-2xl leading-relaxed">{description}</p>
         )}
       </div>
-      {action && <div className="flex flex-wrap items-center gap-2 shrink-0">{action}</div>}
+      {action && (
+        <div className="grid grid-cols-1 min-[400px]:grid-cols-2 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2 shrink-0 w-full sm:w-auto [&_button]:w-full sm:[&_button]:w-auto">
+          {action}
+        </div>
+      )}
     </div>
   );
 }

@@ -92,11 +92,14 @@ export default function ReceiptView({ receiptId, onClose }) {
             <p className="text-sm text-text-muted">No payment sources</p>
           ) : (
             data.sources.map((s, i) => (
-              <div key={i} className="grid grid-cols-[1fr_7rem] gap-2 items-end">
-                <Field label={i === 0 ? 'Source' : undefined}>
+              <div
+                key={i}
+                className="grid grid-cols-1 min-[400px]:grid-cols-[1fr_7rem] gap-2 items-end rounded-lg border border-bg-border/60 p-3 min-[400px]:border-0 min-[400px]:p-0"
+              >
+                <Field label="Source">
                   <DisplayValue>{s.source}</DisplayValue>
                 </Field>
-                <Field label={i === 0 ? 'Amount' : undefined}>
+                <Field label="Amount">
                   <DisplayValue>{formatAUD(Number(s.amount) || 0)}</DisplayValue>
                 </Field>
               </div>
@@ -114,18 +117,18 @@ export default function ReceiptView({ receiptId, onClose }) {
             data.items.map((it, i) => (
               <div
                 key={i}
-                className="grid grid-cols-[1fr_5rem_5.5rem_6rem] gap-2 items-end"
+                className="grid grid-cols-2 sm:grid-cols-[1fr_5rem_5.5rem_6rem] gap-2 items-end rounded-lg border border-bg-border/60 p-3 sm:border-0 sm:p-0"
               >
-                <Field label={i === 0 ? 'Name' : undefined}>
+                <Field label="Name" className="col-span-2 sm:col-span-1">
                   <DisplayValue>{it.name}</DisplayValue>
                 </Field>
-                <Field label={i === 0 ? 'Amount' : undefined}>
+                <Field label="Amount">
                   <DisplayValue>{it.amount != null && it.amount !== '' ? it.amount : '—'}</DisplayValue>
                 </Field>
-                <Field label={i === 0 ? 'Unit' : undefined}>
+                <Field label="Unit">
                   <DisplayValue>{it.unit}</DisplayValue>
                 </Field>
-                <Field label={i === 0 ? 'Money' : undefined}>
+                <Field label="Money" className="col-span-2 sm:col-span-1">
                   <DisplayValue>{formatAUD(Number(it.money) || 0)}</DisplayValue>
                 </Field>
               </div>

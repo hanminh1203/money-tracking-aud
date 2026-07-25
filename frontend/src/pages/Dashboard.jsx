@@ -12,7 +12,14 @@ export default function Dashboard({ data }) {
     <div className="space-y-5 stagger-children">
       <PageHeader
         title="Overview"
-        description="Current month totals, three-month category breakdowns, and this month's activity."
+        description={
+          <>
+            <span className="sm:hidden">Month totals, category trends, and recent activity.</span>
+            <span className="hidden sm:inline">
+              Current month totals, three-month category breakdowns, and this month&apos;s activity.
+            </span>
+          </>
+        }
       />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
@@ -43,7 +50,7 @@ export default function Dashboard({ data }) {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card title="Income Breakdown by Subcategory">
+        <Card title="Income by Subcategory">
           <CategoryBreakdownTable
             months={months}
             rows={incomeBreakdown}
@@ -51,7 +58,7 @@ export default function Dashboard({ data }) {
           />
         </Card>
 
-        <Card title="Expense Breakdown by Subcategory">
+        <Card title="Expense by Subcategory">
           <CategoryBreakdownTable
             months={months}
             rows={expenseBreakdown}

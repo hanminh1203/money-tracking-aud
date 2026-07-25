@@ -2,8 +2,8 @@ import ThemeToggle from './ThemeToggle';
 
 export default function SignInScreen({ onSignIn, error, ready }) {
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 py-12 relative">
-      <div className="absolute top-4 right-4 sm:top-6 sm:right-6">
+    <div className="min-h-screen flex items-center justify-center px-4 py-12 pt-safe pb-safe relative">
+      <div className="absolute top-4 right-4 sm:top-6 sm:right-6 pt-safe pr-safe">
         <ThemeToggle />
       </div>
       <div className="max-w-md w-full animate-fade-up">
