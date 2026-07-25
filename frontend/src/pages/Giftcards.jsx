@@ -85,7 +85,6 @@ export default function Giftcards({ metadata, balances, onSaved, listVersion }) 
                     <button
                       type="button"
                       className={`${actionClass} min-h-9`}
-                      disabled={!(Number(g.balance) > 0)}
                       onClick={() => {
                         setUseCard(g);
                         setModal('use');
@@ -126,7 +125,6 @@ export default function Giftcards({ metadata, balances, onSaved, listVersion }) 
                         <button
                           type="button"
                           className={actionClass}
-                          disabled={!(Number(g.balance) > 0)}
                           onClick={() => {
                             setUseCard(g);
                             setModal('use');

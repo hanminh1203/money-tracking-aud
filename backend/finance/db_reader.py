@@ -272,7 +272,7 @@ def get_receipt(receipt_id: str) -> dict:
 
 
 def get_giftcards() -> list[dict]:
-    """Return all giftcards ordered by date descending."""
+    """Return giftcards with balance > 0, ordered by date desc then shop asc."""
     return [
         {
             'id': str(g.id),
@@ -280,5 +280,5 @@ def get_giftcards() -> list[dict]:
             'date': g.date.isoformat(),
             'balance': _dec_to_number(g.balance),
         }
-        for g in Giftcard.objects.order_by('-date', '-creation_date')
+        for g in Giftcard.objects.filter(balance__gt=0).order_by('-date', 'shop')
     ]
