@@ -1,0 +1,31 @@
+name: Run Database Migrations
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+
+      - name: Pull env vars from Vercel
+        run: vercel env pull .env --token=${{ secrets.VERCEL_TOKEN }} --environment=production
+
+      - name: Run migrations
+        run: |
+          export $(cat .env | xargs)
+          python manage.py migrate
