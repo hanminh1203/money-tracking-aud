@@ -21,4 +21,6 @@ urlpatterns = [
     path('health', api_views.health, name='health'),
     path('management/status', api_views.management_status, name='management_status'),
     path('management/sync', api_views.management_sync, name='management_sync'),
+    path('management/export', api_views.management_export, name='management_export'),
+    path('management/settings', api_views.management_settings, name='management_settings'),
 ]

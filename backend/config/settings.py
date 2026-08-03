@@ -98,8 +98,7 @@ GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/userinfo.email',
 ]
 
-# Google Sheets
-SHEET_ID = os.environ.get('SHEET_ID', '')
+# Google Sheets (per-user sheet_id is stored on finance.User)
 TRANSACTIONS_TABLE = os.environ.get('TRANSACTIONS_TABLE', 'Transactions')
 CATEGORY_TABLE = os.environ.get('CATEGORY_TABLE', 'Category')
 SOURCES_TABLE = os.environ.get('SOURCES_TABLE', 'Sources')

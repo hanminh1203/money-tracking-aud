@@ -10,7 +10,7 @@ from typing import Any
 
 from django.db import transaction as db_transaction
 
-from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction
+from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction, User
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,12 @@ def _dec(value: Any) -> Decimal:
         raise ValueError(f'Invalid decimal: {value!r}') from exc
 
 
+def _require_user(user: User | None) -> User:
+    if user is None:
+        raise ValueError('User is required')
+    return user
+
+
 def _resolve_source_id(name: str) -> uuid.UUID:
     text = str(name or '').strip()
     if not text:
@@ -66,7 +72,7 @@ def _resolve_category_id(sub_category: str) -> uuid.UUID | None:
         raise ValueError(f'Sub category {text!r} not found') from exc
 
 
-def save_transactions(rows: list[dict]) -> None:
+def save_transactions(rows: list[dict], *, user: User) -> None:
     """
     Insert Transaction rows.
 
@@ -76,6 +82,7 @@ def save_transactions(rows: list[dict]) -> None:
     """
     if not rows:
         return
+    owner = _require_user(user)
     try:
         objs = []
         for row in rows:
@@ -85,6 +92,7 @@ def save_transactions(rows: list[dict]) -> None:
                 Transaction(
                     id=uuid.uuid4(),
                     version=1,
+                    user=owner,
                     row_number=int(row['row_number']),
                     date=_parse_date(row['date']),
                     change=_dec(row['change']),
@@ -102,6 +110,7 @@ def save_transactions(rows: list[dict]) -> None:
 
 def save_transaction(
     *,
+    user: User,
     date: Any,
     change: Any,
     source: str,
@@ -123,12 +132,14 @@ def save_transaction(
                 'receipt_id': receipt_id,
                 'giftcard_id': giftcard_id,
             }
-        ]
+        ],
+        user=user,
     )
 
 
 def save_receipt_bundle(
     *,
+    user: User,
     receipt_id: Any,
     date: Any,
     total: Any,
@@ -142,12 +153,14 @@ def save_receipt_bundle(
     items: name, amount, unit, money
     transactions: date, change, source, row_number, comment?, sub_category?
     """
+    owner = _require_user(user)
     try:
         rid = uuid.UUID(str(receipt_id))
         with db_transaction.atomic():
             Receipt.objects.create(
                 id=rid,
                 version=1,
+                user=owner,
                 date=_parse_date(date),
                 total=_dec(total),
             )
@@ -156,6 +169,7 @@ def save_receipt_bundle(
                     ReceiptItem(
                         id=uuid.uuid4(),
                         version=1,
+                        user=owner,
                         receipt_id=rid,
                         name=str(it['name']),
                         amount=_dec(it['amount']),
@@ -170,6 +184,7 @@ def save_receipt_bundle(
                     Transaction(
                         id=uuid.uuid4(),
                         version=1,
+                        user=owner,
                         row_number=int(tx['row_number']),
                         date=_parse_date(tx.get('date', date)),
                         change=_dec(tx['change']),
@@ -187,6 +202,7 @@ def save_receipt_bundle(
 
 def save_giftcard_purchase(
     *,
+    user: User,
     giftcard_id: Any,
     shop: str,
     date: Any,
@@ -195,12 +211,14 @@ def save_giftcard_purchase(
     transactions: list[dict],
 ) -> None:
     """Insert Giftcard + linked buy Transactions in one DB transaction."""
+    owner = _require_user(user)
     try:
         gid = uuid.UUID(str(giftcard_id))
         with db_transaction.atomic():
             Giftcard.objects.create(
                 id=gid,
                 version=1,
+                user=owner,
                 row_number=int(row_number),
                 shop=str(shop),
                 date=_parse_date(date),
@@ -211,6 +229,7 @@ def save_giftcard_purchase(
                     Transaction(
                         id=uuid.uuid4(),
                         version=1,
+                        user=owner,
                         row_number=int(tx['row_number']),
                         date=_parse_date(tx.get('date', date)),
                         change=_dec(tx['change']),
@@ -228,6 +247,7 @@ def save_giftcard_purchase(
 
 def save_giftcard_use(
     *,
+    user: User,
     giftcard_id: Any,
     new_balance: Any,
     date: Any,
@@ -237,15 +257,19 @@ def save_giftcard_use(
     row_number: int,
 ) -> None:
     """Insert use Transaction and update Giftcard.balance in one DB transaction."""
+    owner = _require_user(user)
     try:
         gid = uuid.UUID(str(giftcard_id))
         with db_transaction.atomic():
-            updated = Giftcard.objects.filter(pk=gid).update(balance=_dec(new_balance))
+            updated = Giftcard.objects.filter(pk=gid, user=owner).update(
+                balance=_dec(new_balance)
+            )
             if not updated:
                 raise ValueError(f'Giftcard {gid} not found')
             Transaction.objects.create(
                 id=uuid.uuid4(),
                 version=1,
+                user=owner,
                 row_number=int(row_number),
                 date=_parse_date(date),
                 change=_dec(change),

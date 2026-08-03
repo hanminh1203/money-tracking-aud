@@ -38,6 +38,40 @@ GIFTCARD_TX_COLUMNS = [
 ]
 GIFTCARD_SOURCE_NAME = 'Giftcard'
 
+# Export column formats for Australian locale workbooks.
+EXPORT_AUD_CURRENCY = {'type': 'CURRENCY', 'pattern': '"$"#,##0.00'}
+EXPORT_AU_DATE = {'type': 'DATE', 'pattern': 'd/mm/yyyy'}
+# Logical export table key → column name → numberFormat.
+EXPORT_COLUMN_FORMATS: dict[str, dict[str, dict[str, str]]] = {
+    'transactions': {
+        'Date': EXPORT_AU_DATE,
+        'Change': EXPORT_AUD_CURRENCY,
+    },
+    'giftcards': {
+        'Date': EXPORT_AU_DATE,
+        'Balance': EXPORT_AUD_CURRENCY,
+    },
+    'receipt': {
+        'Date': EXPORT_AU_DATE,
+        'Total': EXPORT_AUD_CURRENCY,
+    },
+    'receipt_items': {
+        'Money': EXPORT_AUD_CURRENCY,
+    },
+}
+
+
+def _export_column_property(table_key: str, column_index: int, column_name: str) -> dict[str, Any]:
+    """Build addTable columnProperties entry; set DATE/CURRENCY types when mapped."""
+    prop: dict[str, Any] = {
+        'columnIndex': column_index,
+        'columnName': column_name,
+    }
+    fmt = (EXPORT_COLUMN_FORMATS.get(table_key) or {}).get(column_name)
+    if fmt and fmt.get('type') in ('CURRENCY', 'DATE'):
+        prop['columnType'] = fmt['type']
+    return prop
+
 
 class SheetsError(Exception):
     def __init__(self, message: str, status: int | None = None):
@@ -74,25 +108,21 @@ def quote_sheet_title(title: str) -> str:
 
 
 class SheetsClient:
-    def __init__(self, access_token: str):
+    def __init__(self, access_token: str, sheet_id: str, user=None):
         self.token = access_token
-        self.sheet_id = settings.SHEET_ID
+        self.sheet_id = (sheet_id or '').strip()
         if not self.sheet_id:
-            raise SheetsError('SHEET_ID is not configured')
+            raise SheetsError('Sheet ID is not configured for this user')
+        self.user = user
         self._tables_cache: dict[str, dict] | None = None
 
-    def request(self, path: str, method: str = 'GET', json_body: Any = None) -> Any:
-        url = f'{BASE}/{self.sheet_id}{path}'
-        res = requests.request(
-            method,
-            url,
-            headers={
-                'Authorization': f'Bearer {self.token}',
-                'Content-Type': 'application/json',
-            },
-            json=json_body,
-            timeout=60,
-        )
+    def _headers(self) -> dict[str, str]:
+        return {
+            'Authorization': f'Bearer {self.token}',
+            'Content-Type': 'application/json',
+        }
+
+    def _raise_for_response(self, res: requests.Response) -> Any:
         if not res.ok:
             try:
                 body = res.json()
@@ -103,6 +133,182 @@ class SheetsClient:
         if res.status_code == 204 or not res.content:
             return {}
         return res.json()
+
+    def request(
+        self,
+        path: str,
+        method: str = 'GET',
+        json_body: Any = None,
+        *,
+        spreadsheet_id: str | None = None,
+    ) -> Any:
+        sid = spreadsheet_id if spreadsheet_id is not None else self.sheet_id
+        url = f'{BASE}/{sid}{path}'
+        res = requests.request(
+            method,
+            url,
+            headers=self._headers(),
+            json=json_body,
+            timeout=60,
+        )
+        return self._raise_for_response(res)
+
+    def create_spreadsheet(self, title: str, sheet_titles: list[str]) -> dict:
+        """Create a new spreadsheet with one tab per title; returns API response."""
+        if not sheet_titles:
+            raise SheetsError('At least one sheet title is required')
+        body = {
+            'properties': {'title': title, 'locale': 'en_AU'},
+            'sheets': [
+                {'properties': {'sheetId': i, 'title': name}}
+                for i, name in enumerate(sheet_titles)
+            ],
+        }
+        res = requests.post(BASE, headers=self._headers(), json=body, timeout=60)
+        return self._raise_for_response(res)
+
+    def export_workbook(self, title: str, tables: dict[str, dict]) -> dict:
+        """Create a new spreadsheet with named tables and Postgres export rows.
+
+        ``tables`` maps logical keys to
+        ``{table_name, columns, rows}`` (rows without header).
+        Returns ``{spreadsheetId, url, counts}``.
+        """
+        if not tables:
+            raise SheetsError('No tables to export')
+
+        # Stable order matching Management UI.
+        order = (
+            'transactions',
+            'giftcards',
+            'receipt',
+            'receipt_items',
+            'category',
+            'sources',
+        )
+        entries = []
+        for key in order:
+            if key not in tables:
+                continue
+            entry = tables[key]
+            entries.append(
+                {
+                    'key': key,
+                    'table_name': entry['table_name'],
+                    'columns': list(entry['columns']),
+                    'rows': list(entry['rows']),
+                }
+            )
+        for key, entry in tables.items():
+            if key in {e['key'] for e in entries}:
+                continue
+            entries.append(
+                {
+                    'key': key,
+                    'table_name': entry['table_name'],
+                    'columns': list(entry['columns']),
+                    'rows': list(entry['rows']),
+                }
+            )
+
+        sheet_titles = [e['table_name'] for e in entries]
+        created = self.create_spreadsheet(title, sheet_titles)
+        spreadsheet_id = created.get('spreadsheetId')
+        if not spreadsheet_id:
+            raise SheetsError('Spreadsheet create did not return an id')
+
+        value_data = []
+        add_table_requests = []
+        format_requests = []
+        counts: dict[str, int] = {}
+
+        for i, entry in enumerate(entries):
+            columns = entry['columns']
+            rows = entry['rows']
+            counts[entry['key']] = len(rows)
+            n_cols = len(columns)
+            # Header row + data rows (exclusive end). Empty tables still get a header.
+            end_row = 1 + len(rows)
+            add_table_requests.append(
+                {
+                    'addTable': {
+                        'table': {
+                            'name': entry['table_name'],
+                            'range': {
+                                'sheetId': i,
+                                'startRowIndex': 0,
+                                'endRowIndex': end_row,
+                                'startColumnIndex': 0,
+                                'endColumnIndex': n_cols,
+                            },
+                            'columnProperties': [
+                                _export_column_property(entry['key'], col_i, name)
+                                for col_i, name in enumerate(columns)
+                            ],
+                        }
+                    }
+                }
+            )
+            if rows:
+                # Data starts under the table header (row 2 in A1 notation).
+                range_a1 = f"{quote_sheet_title(entry['table_name'])}!A2"
+                value_data.append({'range': range_a1, 'values': rows})
+                col_formats = EXPORT_COLUMN_FORMATS.get(entry['key']) or {}
+                for col_name, number_format in col_formats.items():
+                    try:
+                        col_index = columns.index(col_name)
+                    except ValueError:
+                        continue
+                    format_requests.append(
+                        {
+                            'repeatCell': {
+                                'range': {
+                                    'sheetId': i,
+                                    'startRowIndex': 1,
+                                    'endRowIndex': end_row,
+                                    'startColumnIndex': col_index,
+                                    'endColumnIndex': col_index + 1,
+                                },
+                                'cell': {
+                                    'userEnteredFormat': {
+                                        'numberFormat': number_format,
+                                    }
+                                },
+                                'fields': 'userEnteredFormat.numberFormat',
+                            }
+                        }
+                    )
+
+        # Create named tables (headers from columnProperties) before writing data.
+        self.request(
+            ':batchUpdate',
+            method='POST',
+            spreadsheet_id=spreadsheet_id,
+            json_body={'requests': add_table_requests},
+        )
+        if value_data:
+            self.request(
+                '/values:batchUpdate',
+                method='POST',
+                spreadsheet_id=spreadsheet_id,
+                json_body={
+                    'valueInputOption': 'USER_ENTERED',
+                    'data': value_data,
+                },
+            )
+        if format_requests:
+            self.request(
+                ':batchUpdate',
+                method='POST',
+                spreadsheet_id=spreadsheet_id,
+                json_body={'requests': format_requests},
+            )
+
+        return {
+            'spreadsheetId': spreadsheet_id,
+            'url': f'https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit',
+            'counts': counts,
+        }
 
     def check_connection(self) -> dict:
         """Lightweight probe — spreadsheet metadata only."""
@@ -255,27 +461,21 @@ class SheetsClient:
         return rows
 
     def get_mirror_source_rows(self) -> dict[str, list[dict]]:
-        """Read mirror tables (Transactions, Receipt, Receipt_Items, Category, Sources, Giftcard)."""
+        """Read user-owned mirror tables (Transactions, Receipt, Receipt_Items, Giftcard)."""
         tx_table = self.get_table(settings.TRANSACTIONS_TABLE)
         receipt_table = self.get_table(settings.RECEIPT_TABLE)
         items_table = self.get_table(settings.RECEIPT_ITEMS_TABLE)
-        category_table = self.get_table(settings.CATEGORY_TABLE)
-        sources_table = self.get_table(settings.SOURCES_TABLE)
         giftcard_table = self.get_table(settings.GIFTCARD_TABLE)
         (
             tx_vals,
             receipt_vals,
             item_vals,
-            category_vals,
-            sources_vals,
             giftcard_vals,
         ) = self.batch_get_values(
             [
                 self.data_range_a1(tx_table),
                 self.data_range_a1(receipt_table),
                 self.data_range_a1(items_table),
-                self.data_range_a1(category_table),
-                self.data_range_a1(sources_table),
                 self.data_range_a1(giftcard_table),
             ]
         )
@@ -283,8 +483,6 @@ class SheetsClient:
             'transactions': self._rows_as_dicts(tx_table, tx_vals),
             'receipts': self._rows_as_dicts(receipt_table, receipt_vals),
             'receipt_items': self._rows_as_dicts(items_table, item_vals),
-            'categories': self._rows_as_dicts(category_table, category_vals),
-            'sources': self._rows_as_dicts(sources_table, sources_vals),
             'giftcards': self._rows_as_dicts(giftcard_table, giftcard_vals),
         }
 
@@ -416,6 +614,7 @@ class SheetsClient:
             [date, signed, source, comment or '', sub_category or '']
         )
         db_writer.save_transaction(
+            user=self.user,
             date=date,
             change=signed,
             source=source,
@@ -469,7 +668,8 @@ class SheetsClient:
                     'sub_category': 'Exchange (self)',
                     'row_number': to_row,
                 },
-            ]
+            ],
+            user=self.user,
         )
         return {'added': 2}
 
@@ -560,6 +760,7 @@ class SheetsClient:
         )
 
         db_writer.save_receipt_bundle(
+            user=self.user,
             receipt_id=receipt_id,
             date=date,
             total=total,
@@ -636,6 +837,7 @@ class SheetsClient:
         )
 
         db_writer.save_giftcard_purchase(
+            user=self.user,
             giftcard_id=giftcard_id,
             shop=shop_name,
             date=date,
@@ -692,7 +894,7 @@ class SheetsClient:
             raise SheetsError('Invalid amount')
 
         try:
-            card = Giftcard.objects.get(pk=gid)
+            card = Giftcard.objects.get(pk=gid, user=self.user)
         except (Giftcard.DoesNotExist, ValueError) as exc:
             raise SheetsError('Giftcard not found', status=404) from exc
 
@@ -719,6 +921,7 @@ class SheetsClient:
         )
 
         db_writer.save_giftcard_use(
+            user=self.user,
             giftcard_id=gid,
             new_balance=new_balance,
             date=date,

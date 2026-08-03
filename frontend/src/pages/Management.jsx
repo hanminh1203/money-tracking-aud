@@ -1,25 +1,64 @@
 import { useCallback, useEffect, useState } from 'react';
 import Card from '../components/Card';
+import { inputClass } from '../components/FormField';
 import PageHeader from '../components/PageHeader';
-import { fetchManagementStatus, syncManagement } from '../lib/api';
+import {
+  exportManagement,
+  fetchManagementSettings,
+  fetchManagementStatus,
+  saveManagementSettings,
+  syncManagement,
+} from '../lib/api';
 
 const TABLES = [
   { key: 'transactions', label: 'Transactions' },
   { key: 'receipt', label: 'Receipt' },
   { key: 'receipt_items', label: 'Receipt Items' },
   { key: 'giftcards', label: 'Giftcards' },
-  { key: 'category', label: 'Category' },
-  { key: 'sources', label: 'Sources' },
 ];
+
+const SYNC_CONFIRM =
+  'This will delete your Transactions, Giftcards, Receipts, and Receipt Items in Postgres and reload them from your Google Sheet. Continue?';
+
+function confirmSync() {
+  return window.confirm(SYNC_CONFIRM);
+}
 
 export default function Management() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
   const [error, setError] = useState(null);
   const [syncMessage, setSyncMessage] = useState(null);
+  const [exportResult, setExportResult] = useState(null);
+  const [sheetId, setSheetId] = useState('');
+  const [savedSheetId, setSavedSheetId] = useState(null);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
-  const loadStatus = useCallback(async () => {
+  const hasSheet = Boolean((savedSheetId || '').trim());
+
+  const loadSettings = useCallback(async () => {
+    try {
+      const result = await fetchManagementSettings();
+      const id = result?.sheetId || '';
+      setSheetId(id);
+      setSavedSheetId(id || null);
+    } catch (err) {
+      setError(err.message || 'Failed to load settings');
+    } finally {
+      setSettingsLoaded(true);
+    }
+  }, []);
+
+  const loadStatus = useCallback(async (opts = {}) => {
+    const ready = opts.force || hasSheet;
+    if (!ready) {
+      setData(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -31,18 +70,18 @@ export default function Management() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [hasSheet]);
 
   useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
+
+  useEffect(() => {
+    if (!settingsLoaded) return;
     loadStatus();
-  }, [loadStatus]);
+  }, [settingsLoaded, loadStatus]);
 
-  const handleSync = async () => {
-    const confirmed = window.confirm(
-      'This will delete all Postgres mirror data and reload from Google Sheet. Continue?'
-    );
-    if (!confirmed) return;
-
+  const runSync = async () => {
     setSyncing(true);
     setError(null);
     setSyncMessage(null);
@@ -50,9 +89,9 @@ export default function Management() {
       const result = await syncManagement();
       const inserted = result?.inserted || {};
       setSyncMessage(
-        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards, ${inserted.category ?? 0} categories, ${inserted.sources ?? 0} sources.`
+        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards.`
       );
-      await loadStatus();
+      await loadStatus({ force: true });
     } catch (err) {
       setError(err.message || 'Sync failed');
     } finally {
@@ -60,25 +99,129 @@ export default function Management() {
     }
   };
 
-  const busy = loading || syncing;
-  const overallStatus = loading ? 'checking' : data?.matched ? 'ok' : 'mismatch';
+  const handleSaveSettings = async (event) => {
+    event.preventDefault();
+    const next = sheetId.trim();
+    if (!next) {
+      setError('Sheet ID is required');
+      return;
+    }
+    if (!confirmSync()) return;
+
+    setSavingSettings(true);
+    setError(null);
+    setSyncMessage(null);
+    setExportResult(null);
+    try {
+      const result = await saveManagementSettings({ sheetId: next });
+      const id = result?.sheetId || next;
+      setSheetId(id);
+      setSavedSheetId(id);
+      setSavingSettings(false);
+      await runSync();
+    } catch (err) {
+      setError(err.message || 'Failed to save sheet ID');
+      setSavingSettings(false);
+    }
+  };
+
+  const handleSync = async () => {
+    if (!confirmSync()) return;
+    await runSync();
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    setError(null);
+    setExportResult(null);
+    try {
+      const result = await exportManagement();
+      setExportResult(result);
+      if (result?.url) {
+        window.open(result.url, '_blank', 'noopener,noreferrer');
+      }
+    } catch (err) {
+      setError(err.message || 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const busy = loading || syncing || exporting || savingSettings;
+  const overallStatus = !hasSheet
+    ? 'checking'
+    : loading
+      ? 'checking'
+      : data?.matched
+        ? 'ok'
+        : 'mismatch';
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Management"
-        description="Compare Google Sheet mirror tables with Postgres, and sync when they drift."
+        description="Set your Google Sheet, compare mirror tables with Postgres, sync when they drift, or export Postgres to a new sheet."
         action={
           <>
-            <button type="button" onClick={loadStatus} disabled={busy} className="btn-secondary">
+            <button
+              type="button"
+              onClick={loadStatus}
+              disabled={busy || !hasSheet}
+              className="btn-secondary"
+            >
               {loading ? 'Checking…' : 'Refresh status'}
             </button>
-            <button type="button" onClick={handleSync} disabled={busy} className="btn-primary">
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={busy || !hasSheet}
+              className="btn-secondary"
+            >
+              {exporting ? 'Exporting…' : 'Export to Google Sheet'}
+            </button>
+            <button
+              type="button"
+              onClick={handleSync}
+              disabled={busy || !hasSheet}
+              className="btn-primary"
+            >
               {syncing ? 'Syncing…' : 'Sync'}
             </button>
           </>
         }
       />
+
+      <Card title="Google Sheet">
+        <form onSubmit={handleSaveSettings} className="space-y-3">
+          <p className="text-sm text-text-muted">
+            Spreadsheet ID from the sheet URL (<code className="text-xs">/d/&lt;id&gt;/edit</code>).
+            Sync and status use this sheet for your account only.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={sheetId}
+              onChange={(e) => setSheetId(e.target.value)}
+              placeholder="Spreadsheet ID"
+              className={`${inputClass} flex-1 min-w-0`}
+              disabled={savingSettings || syncing}
+              autoComplete="off"
+            />
+            <button
+              type="submit"
+              disabled={savingSettings || syncing}
+              className="btn-secondary shrink-0"
+            >
+              {savingSettings ? 'Saving…' : syncing ? 'Syncing…' : 'Save sheet ID'}
+            </button>
+          </div>
+          {!hasSheet && settingsLoaded && (
+            <p className="text-sm text-amber-700 dark:text-amber-400">
+              Save a sheet ID before sync, status, or export.
+            </p>
+          )}
+        </form>
+      </Card>
 
       {error && (
         <div className="p-4 rounded-xl border border-expense/30 bg-expense/5 text-expense text-sm">
@@ -92,18 +235,47 @@ export default function Management() {
         </div>
       )}
 
-      <OverallStatus status={overallStatus} checkedAt={loading ? null : data?.checked_at} />
+      {exportResult && (
+        <div className="p-4 rounded-xl border border-income/30 bg-income/5 text-income text-sm space-y-1">
+          <p>
+            Exported {exportResult.counts?.transactions ?? 0} transactions,{' '}
+            {exportResult.counts?.receipt ?? 0} receipts,{' '}
+            {exportResult.counts?.receipt_items ?? 0} receipt items,{' '}
+            {exportResult.counts?.giftcards ?? 0} giftcards,{' '}
+            {exportResult.counts?.category ?? 0} categories,{' '}
+            {exportResult.counts?.sources ?? 0} sources.
+          </p>
+          {exportResult.url && (
+            <p>
+              <a
+                href={exportResult.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-medium"
+              >
+                Open exported Google Sheet
+              </a>
+            </p>
+          )}
+        </div>
+      )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        {TABLES.map(({ key, label }) => (
-          <TableCard
-            key={key}
-            label={label}
-            table={data?.tables?.[key]}
-            checking={loading}
-          />
-        ))}
-      </div>
+      {hasSheet && (
+        <>
+          <OverallStatus status={overallStatus} checkedAt={loading ? null : data?.checked_at} />
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {TABLES.map(({ key, label }) => (
+              <TableCard
+                key={key}
+                label={label}
+                table={data?.tables?.[key]}
+                checking={loading}
+              />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

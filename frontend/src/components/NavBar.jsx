@@ -36,7 +36,7 @@ function BrandMark() {
 const iconBtnClass =
   'inline-flex items-center justify-center min-h-11 min-w-11 p-2 rounded-lg text-text-secondary hover:text-text-primary hover:bg-bg-raised transition-colors duration-200 cursor-pointer disabled:opacity-50';
 
-export default function NavBar({ onRefresh, refreshing, onSignOut }) {
+export default function NavBar({ onSignOut }) {
   const { pathname } = useLocation();
   const mobileNavRef = useRef(null);
 
@@ -78,27 +78,6 @@ export default function NavBar({ onRefresh, refreshing, onSignOut }) {
 
           <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
             <ThemeToggle />
-            <button
-              type="button"
-              onClick={onRefresh}
-              disabled={refreshing}
-              aria-label="Refresh data"
-              className={iconBtnClass}
-            >
-              <svg
-                className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`}
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M4.5 12a7.5 7.5 0 0113.5-4.5M19.5 12a7.5 7.5 0 01-13.5 4.5M4.5 4.5v4.5h4.5M19.5 19.5V15h-4.5"
-                />
-              </svg>
-            </button>
             <button type="button" onClick={onSignOut} aria-label="Sign out" className={iconBtnClass}>
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path

@@ -52,7 +52,8 @@ Or use [`start.bat`](start.bat), which starts the container, waits until it is h
 ```bash
 cd backend
 cp .env.example .env
-# fill DJANGO_SECRET_KEY, GOOGLE_*, SHEET_ID, GROQ_API_KEY, …
+# fill DJANGO_SECRET_KEY, GOOGLE_*, GROQ_API_KEY, …
+# (each user sets their Google Spreadsheet ID in the Management page)
 # Postgres defaults in .env.example match docker compose
 py -3 -m venv .venv
 .\.venv\Scripts\activate          # Windows

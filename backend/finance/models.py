@@ -14,9 +14,30 @@ class AuditedModel(models.Model):
         abstract = True
 
 
+class User(models.Model):
+    """App user created from Google OAuth email."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email = models.EmailField(unique=True)
+    sheet_id = models.CharField(max_length=256, blank=True, default='')
+    creation_date = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'app_user'
+
+    def __str__(self) -> str:
+        return self.email
+
+
 class Receipt(AuditedModel):
     """Mirrors Sheets Receipt; id equals sheet Receipt ID."""
 
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='receipts',
+        db_column='user_id',
+    )
     date = models.DateField()
     total = models.DecimalField(max_digits=14, decimal_places=2)
 
@@ -27,6 +48,12 @@ class Receipt(AuditedModel):
 class ReceiptItem(AuditedModel):
     """Mirrors Sheets Receipt_Items."""
 
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='receipt_items',
+        db_column='user_id',
+    )
     receipt = models.ForeignKey(
         Receipt,
         on_delete=models.CASCADE,
@@ -66,8 +93,13 @@ class Source(AuditedModel):
 class Giftcard(AuditedModel):
     """Mirrors Sheets Giftcard; id equals sheet Giftcard ID."""
 
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='giftcards',
+        db_column='user_id',
+    )
     row_number = models.PositiveIntegerField(
-        unique=True,
         help_text='1-based Google Sheets row number in the Giftcard table.',
     )
     shop = models.CharField(max_length=256)
@@ -76,13 +108,24 @@ class Giftcard(AuditedModel):
 
     class Meta:
         db_table = 'giftcard'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'row_number'],
+                name='giftcard_user_row_number_uniq',
+            ),
+        ]
 
 
 class Transaction(AuditedModel):
     """Mirrors Sheets Transactions row."""
 
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='transactions',
+        db_column='user_id',
+    )
     row_number = models.PositiveIntegerField(
-        unique=True,
         help_text='1-based Google Sheets row number in the Transactions table.',
     )
     date = models.DateField()
@@ -121,3 +164,9 @@ class Transaction(AuditedModel):
 
     class Meta:
         db_table = 'transaction'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'row_number'],
+                name='transaction_user_row_number_uniq',
+            ),
+        ]

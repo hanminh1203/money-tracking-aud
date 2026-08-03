@@ -19,6 +19,7 @@ SESSION_ACCESS = 'google_access_token'
 SESSION_REFRESH = 'google_refresh_token'
 SESSION_EXPIRES = 'google_token_expires_at'
 SESSION_EMAIL = 'google_email'
+SESSION_USER_ID = 'finance_user_id'
 
 
 class AuthError(Exception):
@@ -109,6 +110,11 @@ def store_tokens(request: HttpRequest, token_data: dict[str, Any], email: str | 
     request.session.modified = True
 
 
+def store_finance_user(request: HttpRequest, user_id: str) -> None:
+    request.session[SESSION_USER_ID] = str(user_id)
+    request.session.modified = True
+
+
 def clear_tokens(request: HttpRequest) -> None:
     access = request.session.get(SESSION_ACCESS)
     if access:
@@ -116,7 +122,13 @@ def clear_tokens(request: HttpRequest) -> None:
             requests.post(GOOGLE_REVOKE_URL, params={'token': access}, timeout=10)
         except Exception:
             pass
-    for key in (SESSION_ACCESS, SESSION_REFRESH, SESSION_EXPIRES, SESSION_EMAIL):
+    for key in (
+        SESSION_ACCESS,
+        SESSION_REFRESH,
+        SESSION_EXPIRES,
+        SESSION_EMAIL,
+        SESSION_USER_ID,
+    ):
         request.session.pop(key, None)
     request.session.modified = True
 
@@ -140,3 +152,23 @@ def get_access_token(request: HttpRequest) -> str:
     data = refresh_access_token(refresh)
     store_tokens(request, data)
     return request.session[SESSION_ACCESS]
+
+
+def get_finance_user(request: HttpRequest):
+    """Return the finance.User for this session, creating from email if needed."""
+    from finance.models import User
+
+    uid = request.session.get(SESSION_USER_ID)
+    if uid:
+        try:
+            return User.objects.get(pk=uid)
+        except (User.DoesNotExist, ValueError, TypeError):
+            pass
+
+    email = (request.session.get(SESSION_EMAIL) or '').strip()
+    if not email:
+        raise AuthError('Not authenticated', status=401)
+
+    user, _ = User.objects.get_or_create(email=email)
+    store_finance_user(request, str(user.id))
+    return user
