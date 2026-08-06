@@ -64,6 +64,8 @@ DATABASES = {
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'finance'),
         'HOST': os.environ.get('POSTGRES_HOST', '127.0.0.1'),
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+        # Named cursors break under transaction-mode poolers (PgBouncer / Supabase / Neon).
+        'DISABLE_SERVER_SIDE_CURSORS': True,
     }
 }
 
