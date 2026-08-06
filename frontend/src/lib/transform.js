@@ -62,6 +62,7 @@ export function normalizeRows(rows, categories = [], { sort = true } = {}) {
         mainCategory: String(cat?.mainCategory || r['Main Category'] || '').trim(),
         type: String(cat?.type || r['Type'] || '').trim(),
         receiptId: String(r['Receipt ID'] || r.receiptId || '').trim() || null,
+        giftcardId: String(r['Giftcard ID'] || r.giftcardId || '').trim() || null,
       };
     })
     .filter((r) => r.date && r.source);

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import Modal from './Modal';
 import ReceiptView from './ReceiptView';
+import TransactionDetailView from './TransactionDetailView';
 import { formatAUD, formatDateShort } from '../lib/transform';
 
 const viewBtnClass =
@@ -15,7 +16,7 @@ function amountClass(t) {
   return 'text-text-secondary';
 }
 
-function MobileTransactionCards({ transactions, onViewReceipt }) {
+function MobileTransactionCards({ transactions, onViewReceipt, onViewDetails }) {
   return (
     <ul className="space-y-2 sm:hidden">
       {transactions.map((t, i) => (
@@ -40,15 +41,24 @@ function MobileTransactionCards({ transactions, onViewReceipt }) {
               <div className={`text-sm font-medium tabular-money ${amountClass(t)}`}>
                 {formatAUD(t.change)}
               </div>
-              {t.receiptId ? (
+              <div className="flex flex-col items-end gap-1.5">
                 <button
                   type="button"
                   className={viewBtnClass}
-                  onClick={() => onViewReceipt(t.receiptId)}
+                  onClick={() => onViewDetails(t)}
                 >
-                  Receipt
+                  Details
                 </button>
-              ) : null}
+                {t.receiptId ? (
+                  <button
+                    type="button"
+                    className={viewBtnClass}
+                    onClick={() => onViewReceipt(t.receiptId)}
+                  >
+                    Receipt
+                  </button>
+                ) : null}
+              </div>
             </div>
           </div>
         </li>
@@ -68,6 +78,7 @@ export default function TransactionList({
   loading = false,
 }) {
   const [viewReceiptId, setViewReceiptId] = useState(null);
+  const [selectedTransaction, setSelectedTransaction] = useState(null);
 
   const paginated = Number.isFinite(pageSize) && pageSize > 0 && total != null;
   const safePage = paginated ? Math.min(Math.max(1, page || 1), Math.max(1, totalPages || 1)) : 1;
@@ -80,10 +91,19 @@ export default function TransactionList({
   const from = paginated && total > 0 ? (safePage - 1) * pageSize + 1 : transactions.length ? 1 : 0;
   const to = paginated && total > 0 ? Math.min(safePage * pageSize, total) : transactions.length;
 
+  const openReceiptFromDetails = (receiptId) => {
+    setSelectedTransaction(null);
+    setViewReceiptId(receiptId);
+  };
+
   return (
     <>
       <div className={loading ? 'opacity-60' : undefined}>
-        <MobileTransactionCards transactions={transactions} onViewReceipt={setViewReceiptId} />
+        <MobileTransactionCards
+          transactions={transactions}
+          onViewReceipt={setViewReceiptId}
+          onViewDetails={setSelectedTransaction}
+        />
 
         <div className="hidden sm:block overflow-x-auto scrollbar-thin">
           <table className="w-full text-sm">
@@ -102,6 +122,9 @@ export default function TransactionList({
                 </th>
                 <th className="py-2 pl-4 text-xs font-semibold uppercase tracking-[0.05em] text-right">
                   Receipt
+                </th>
+                <th className="py-2 pl-4 text-xs font-semibold uppercase tracking-[0.05em] text-right">
+                  Details
                 </th>
               </tr>
             </thead>
@@ -136,6 +159,15 @@ export default function TransactionList({
                         View
                       </button>
                     ) : null}
+                  </td>
+                  <td className="py-2.5 pl-4 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      className={viewBtnClass}
+                      onClick={() => setSelectedTransaction(t)}
+                    >
+                      Details
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -173,10 +205,18 @@ export default function TransactionList({
         </div>
       )}
 
-      {viewReceiptId && (
-        <Modal title="Receipt" onClose={() => setViewReceiptId(null)} maxWidth="max-w-2xl">
-          <ReceiptView receiptId={viewReceiptId} onClose={() => setViewReceiptId(null)} />
+      {selectedTransaction && (
+        <Modal title="Transaction" onClose={() => setSelectedTransaction(null)} maxWidth="max-w-lg">
+          <TransactionDetailView
+            transaction={selectedTransaction}
+            onClose={() => setSelectedTransaction(null)}
+            onViewReceipt={openReceiptFromDetails}
+          />
         </Modal>
+      )}
+
+      {viewReceiptId && (
+        <ReceiptView receiptId={viewReceiptId} onClose={() => setViewReceiptId(null)} />
       )}
     </>
   );

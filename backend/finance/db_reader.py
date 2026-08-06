@@ -74,6 +74,7 @@ def _dashboard_tx_row(tx: Transaction) -> dict:
         'mainCategory': tx.category.main_category if tx.category_id else '',
         'type': tx.category.type if tx.category_id else '',
         'receiptId': str(tx.receipt_id) if tx.receipt_id else None,
+        'giftcardId': str(tx.giftcard_id) if tx.giftcard_id else None,
     }
 
 
