@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db.models import Case, DecimalField, QuerySet, Sum, Value, When
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
@@ -49,6 +50,7 @@ def _dec_to_number(value: Decimal) -> float:
 
 def _tx_row(tx: Transaction) -> dict:
     return {
+        'id': str(tx.id),
         'Date': tx.date.isoformat(),
         'Change': _dec_to_number(tx.change),
         'Source': tx.source.name if tx.source_id else '',
@@ -64,6 +66,7 @@ def _tx_row(tx: Transaction) -> dict:
 def _dashboard_tx_row(tx: Transaction) -> dict:
     """Return a transaction already shaped for the dashboard UI."""
     return {
+        'id': str(tx.id),
         'row': tx.row_number,
         'date': tx.date.isoformat(),
         'creationDate': tx.creation_date.isoformat() if tx.creation_date else None,
@@ -76,6 +79,25 @@ def _dashboard_tx_row(tx: Transaction) -> dict:
         'receiptId': str(tx.receipt_id) if tx.receipt_id else None,
         'giftcardId': str(tx.giftcard_id) if tx.giftcard_id else None,
     }
+
+
+def _receipt_items(receipt: Receipt) -> list[dict]:
+    items = sorted(
+        receipt.items.all(),
+        key=lambda it: (
+            it.creation_date.isoformat() if it.creation_date else '',
+            str(it.id),
+        ),
+    )
+    return [
+        {
+            'name': it.name,
+            'amount': _dec_to_number(it.amount),
+            'unit': it.unit,
+            'money': _dec_to_number(it.money),
+        }
+        for it in items
+    ]
 
 
 def _shift_month(value: date, offset: int) -> date:
@@ -254,15 +276,7 @@ def get_receipt(*, user: User, receipt_id: str) -> dict:
     except (Receipt.DoesNotExist, ValueError) as exc:
         raise ReaderError('Receipt not found', status=404) from exc
 
-    items = [
-        {
-            'name': it.name,
-            'amount': _dec_to_number(it.amount),
-            'unit': it.unit,
-            'money': _dec_to_number(it.money),
-        }
-        for it in receipt.items.all()
-    ]
+    items = _receipt_items(receipt)
 
     sources = []
     store = ''
@@ -290,6 +304,35 @@ def get_receipt(*, user: User, receipt_id: str) -> dict:
         'sources': sources,
         'items': items,
     }
+
+
+def get_transaction(*, user: User, transaction_id: str) -> dict:
+    """Return one user-owned transaction, with nested receipt items when linked."""
+    tid = str(transaction_id or '').strip()
+    if not tid:
+        raise ReaderError('Transaction ID is required', status=400)
+
+    try:
+        tx = (
+            Transaction.objects.filter(user=user)
+            .select_related('source', 'category', 'receipt')
+            .prefetch_related('receipt__items')
+            .get(pk=tid)
+        )
+    except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
+        raise ReaderError('Transaction not found', status=404) from exc
+
+    data = _dashboard_tx_row(tx)
+    if tx.receipt_id and tx.receipt:
+        data['receipt'] = {
+            'receiptId': str(tx.receipt.id),
+            'date': tx.receipt.date.isoformat(),
+            'total': _dec_to_number(tx.receipt.total),
+            'items': _receipt_items(tx.receipt),
+        }
+    else:
+        data['receipt'] = None
+    return data
 
 
 def get_giftcards(*, user: User) -> list[dict]:

@@ -4,9 +4,9 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 
-from finance.db_reader import get_dashboard_data
+from finance.db_reader import ReaderError, get_dashboard_data, get_transaction
 from finance.db_sync import sync_from_sheets
-from finance.models import Category, Giftcard, Source, Transaction, User
+from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction, User
 
 
 class DashboardDataTests(TestCase):
@@ -202,3 +202,138 @@ class SyncIsolationTests(TestCase):
         self.assertEqual(Giftcard.objects.filter(user=self.user_b).count(), 1)
         self.assertEqual(Source.objects.count(), 1)
         self.assertEqual(Category.objects.count(), 1)
+
+
+class TransactionDetailTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='detail@example.com')
+        self.other = User.objects.create(email='other-detail@example.com')
+        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+
+    def add_transaction(self, **kwargs):
+        defaults = {
+            'user': self.user,
+            'row_number': 1,
+            'date': date(2026, 1, 8),
+            'change': Decimal('-42.50'),
+            'source': self.source,
+            'category': self.groceries,
+            'comment': 'Woolworths : weekly shop',
+        }
+        defaults.update(kwargs)
+        return Transaction.objects.create(**defaults)
+
+    def test_get_transaction_without_receipt(self):
+        tx = self.add_transaction()
+
+        data = get_transaction(user=self.user, transaction_id=str(tx.id))
+
+        self.assertEqual(data['id'], str(tx.id))
+        self.assertEqual(data['date'], '2026-01-08')
+        self.assertEqual(data['change'], -42.5)
+        self.assertEqual(data['source'], 'Everyday')
+        self.assertEqual(data['subCategory'], 'Groceries')
+        self.assertEqual(data['mainCategory'], 'Living')
+        self.assertEqual(data['type'], 'Expense')
+        self.assertEqual(data['comment'], 'Woolworths : weekly shop')
+        self.assertIsNone(data['receiptId'])
+        self.assertIsNone(data['receipt'])
+
+    def test_get_transaction_with_receipt_items(self):
+        receipt = Receipt.objects.create(
+            user=self.user,
+            date=date(2026, 1, 8),
+            total=Decimal('12.50'),
+        )
+        ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Milk',
+            amount=Decimal('2'),
+            unit='L',
+            money=Decimal('4.50'),
+        )
+        ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Bread',
+            amount=Decimal('1'),
+            unit='loaf',
+            money=Decimal('8.00'),
+        )
+        tx = self.add_transaction(receipt=receipt)
+
+        data = get_transaction(user=self.user, transaction_id=str(tx.id))
+
+        self.assertEqual(data['receiptId'], str(receipt.id))
+        self.assertEqual(data['receipt']['receiptId'], str(receipt.id))
+        self.assertEqual(data['receipt']['total'], 12.5)
+        self.assertEqual(
+            data['receipt']['items'],
+            [
+                {'name': 'Milk', 'amount': 2.0, 'unit': 'L', 'money': 4.5},
+                {'name': 'Bread', 'amount': 1.0, 'unit': 'loaf', 'money': 8.0},
+            ],
+        )
+
+    def test_get_transaction_not_found(self):
+        with self.assertRaises(ReaderError) as ctx:
+            get_transaction(
+                user=self.user,
+                transaction_id='00000000-0000-0000-0000-000000000001',
+            )
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_get_transaction_hides_other_user_rows(self):
+        tx = self.add_transaction(user=self.other, row_number=2)
+
+        with self.assertRaises(ReaderError) as ctx:
+            get_transaction(user=self.user, transaction_id=str(tx.id))
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_get_transaction_invalid_uuid(self):
+        with self.assertRaises(ReaderError) as ctx:
+            get_transaction(user=self.user, transaction_id='not-a-uuid')
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_get_transaction_requires_id(self):
+        with self.assertRaises(ReaderError) as ctx:
+            get_transaction(user=self.user, transaction_id='  ')
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_detail_api_requires_authentication(self):
+        response = self.client.get(
+            '/api/transactions/00000000-0000-0000-0000-000000000001'
+        )
+        self.assertEqual(response.status_code, 401)
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_detail_api_returns_payload(self, _access_token, get_user):
+        get_user.return_value = self.user
+        tx = self.add_transaction()
+
+        response = self.client.get(f'/api/transactions/{tx.id}')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['id'], str(tx.id))
+        self.assertEqual(payload['source'], 'Everyday')
+        self.assertIsNone(payload['receipt'])
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_detail_api_returns_404_for_missing(self, _access_token, get_user):
+        get_user.return_value = self.user
+
+        response = self.client.get(
+            '/api/transactions/00000000-0000-0000-0000-000000000001'
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['error'], 'Transaction not found')

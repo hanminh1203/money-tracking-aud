@@ -27,6 +27,7 @@ from .db_reader import (
     get_giftcards as db_get_giftcards,
     get_metadata as db_get_metadata,
     get_receipt as db_get_receipt,
+    get_transaction as db_get_transaction,
     get_transaction_data,
 )
 from .db_sync import SyncError, compare_mirror, sync_from_sheets
@@ -206,6 +207,17 @@ def transactions(request: HttpRequest) -> JsonResponse:
     except SheetsError as exc:
         return json_error(str(exc), status=exc.status or 400)
     return JsonResponse(result)
+
+
+@require_GET
+@require_auth
+def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
+    user: User = request.finance_user  # type: ignore[attr-defined]
+    try:
+        data = db_get_transaction(user=user, transaction_id=transaction_id)
+    except ReaderError as exc:
+        return json_error(str(exc), status=exc.status)
+    return JsonResponse(data)
 
 
 @require_GET

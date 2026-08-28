@@ -63,6 +63,10 @@ export function getTransactionData({ page, source } = {}) {
   return api(`/transactions${qs ? `?${qs}` : ''}`);
 }
 
+export function getTransaction(id) {
+  return api(`/transactions/${encodeURIComponent(id)}`);
+}
+
 export function getMetadata() {
   return api('/metadata');
 }

@@ -7,6 +7,7 @@ import Sources from './pages/Sources';
 import Health from './pages/Health';
 import Management from './pages/Management';
 import Transactions from './pages/Transactions';
+import TransactionDetail from './pages/TransactionDetail';
 import Giftcards from './pages/Giftcards';
 import { useAuth } from './hooks/useAuth';
 import { useFinanceData } from './hooks/useFinanceData';
@@ -18,13 +19,15 @@ export default function App() {
   const { transactions, metadata, dashboard, error, refresh, listVersion } = useFinanceData(signedIn);
   const { pathname } = useLocation();
   const balances = useMemo(() => currentBalances(transactions), [transactions]);
-  const skipLoading = pathname === '/health' || pathname === '/management';
+  const isTransactionDetail = /^\/transactions\/[^/]+$/.test(pathname);
+  const skipLoading = pathname === '/health' || pathname === '/management' || isTransactionDetail;
 
   useEffect(() => {
     if (!signedIn) return;
     if (pathname === '/health' || pathname === '/management') return;
+    if (isTransactionDetail) return;
     refresh();
-  }, [pathname, refresh, signedIn]);
+  }, [pathname, refresh, signedIn, isTransactionDetail]);
 
   if (!signedIn) {
     return <SignInScreen onSignIn={signIn} error={authError} ready={ready} />;
@@ -75,6 +78,7 @@ export default function App() {
                 />
               }
             />
+            <Route path="/transactions/:id" element={<TransactionDetail />} />
             <Route
               path="/giftcards"
               element={

@@ -9,6 +9,7 @@ urlpatterns = [
     path('auth/logout', api_views.logout, name='logout'),
     path('dashboard', api_views.dashboard, name='dashboard'),
     path('transactions', api_views.transactions, name='transactions'),
+    path('transactions/<str:transaction_id>', api_views.get_transaction, name='get_transaction'),
     path('metadata', api_views.metadata, name='metadata'),
     path('transfers', api_views.create_transfer, name='create_transfer'),
     path('receipts', api_views.create_receipt, name='create_receipt'),
