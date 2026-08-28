@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Card from '../components/Card';
 import { inputClass } from '../components/FormField';
-import PageHeader from '../components/PageHeader';
+import PageHeader, { PageActions } from '../components/PageHeader';
 import {
   exportManagement,
   fetchManagementSettings,
@@ -157,39 +157,37 @@ export default function Management() {
         : 'mismatch';
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Management"
-        description="Set your Google Sheet, compare mirror tables with Postgres, sync when they drift, or export Postgres to a new sheet."
-        action={
-          <>
-            <button
-              type="button"
-              onClick={loadStatus}
-              disabled={busy || !hasSheet}
-              className="btn-secondary"
-            >
-              {loading ? 'Checking…' : 'Refresh status'}
-            </button>
-            <button
-              type="button"
-              onClick={handleExport}
-              disabled={busy || !hasSheet}
-              className="btn-secondary"
-            >
-              {exporting ? 'Exporting…' : 'Export to Google Sheet'}
-            </button>
-            <button
-              type="button"
-              onClick={handleSync}
-              disabled={busy || !hasSheet}
-              className="btn-primary"
-            >
-              {syncing ? 'Syncing…' : 'Sync'}
-            </button>
-          </>
-        }
-      />
+    <PageHeader
+      title="Management"
+      description="Set your Google Sheet, compare mirror tables with Postgres, sync when they drift, or export Postgres to a new sheet."
+    >
+      <div className="space-y-5">
+      <PageActions>
+        <button
+          type="button"
+          onClick={loadStatus}
+          disabled={busy || !hasSheet}
+          className="btn-secondary"
+        >
+          {loading ? 'Checking…' : 'Refresh status'}
+        </button>
+        <button
+          type="button"
+          onClick={handleExport}
+          disabled={busy || !hasSheet}
+          className="btn-secondary"
+        >
+          {exporting ? 'Exporting…' : 'Export to Google Sheet'}
+        </button>
+        <button
+          type="button"
+          onClick={handleSync}
+          disabled={busy || !hasSheet}
+          className="btn-primary"
+        >
+          {syncing ? 'Syncing…' : 'Sync'}
+        </button>
+      </PageActions>
 
       <Card title="Google Sheet">
         <form onSubmit={handleSaveSettings} className="space-y-3">
@@ -277,6 +275,7 @@ export default function Management() {
         </>
       )}
     </div>
+    </PageHeader>
   );
 }
 

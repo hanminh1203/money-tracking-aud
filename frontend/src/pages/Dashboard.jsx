@@ -9,20 +9,19 @@ export default function Dashboard({ data }) {
   const currentMonth = months[months.length - 1];
 
   return (
-    <div className="space-y-5 stagger-children">
-      <PageHeader
-        title="Overview"
-        description={
-          <>
-            <span className="sm:hidden">Month totals, category trends, and recent activity.</span>
-            <span className="hidden sm:inline">
-              Current month totals, three-month category breakdowns, and this month&apos;s activity.
-            </span>
-          </>
-        }
-      />
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+    <PageHeader
+      title="Overview"
+      description={
+        <>
+          <span className="sm:hidden">Month totals, category trends, and recent activity.</span>
+          <span className="hidden sm:inline">
+            Current month totals, three-month category breakdowns, and this month&apos;s activity.
+          </span>
+        </>
+      }
+    >
+      <div className="space-y-5 stagger-children">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
         <StatCard
           label="Net Worth"
           value={summary.netWorth}
@@ -74,5 +73,6 @@ export default function Dashboard({ data }) {
         />
       </Card>
     </div>
+    </PageHeader>
   );
 }

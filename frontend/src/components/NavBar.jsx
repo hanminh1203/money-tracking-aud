@@ -104,7 +104,7 @@ export default function NavBar({ onSignOut }) {
 
 function MobileNav({ collapseId, mobileOpen, setMobileOpen, onSignOut }) {
   return (
-    <header className="md:hidden sticky top-0 z-30 border-b border-bg-border/80 bg-bg-surface/85 backdrop-blur-md pt-safe">
+    <header className="md:hidden shrink-0 sticky top-0 z-30 border-b border-bg-border/80 bg-bg-surface/85 backdrop-blur-md pt-safe">
       <div className="flex items-center justify-between gap-2 h-14 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))]">
         <div className="flex items-center gap-2.5 min-w-0">
           <BrandMark />
@@ -167,7 +167,7 @@ function MobileNav({ collapseId, mobileOpen, setMobileOpen, onSignOut }) {
 function DesktopSidebar({ collapsed, onToggleCollapsed, onSignOut }) {
   return (
     <aside
-      className={`hidden md:flex md:flex-col sticky top-0 z-20 h-dvh shrink-0 overflow-x-hidden border-r border-bg-border/80 bg-bg-surface/85 backdrop-blur-md transition-[width] duration-200 ease-out ${
+      className={`hidden md:flex md:flex-col h-full shrink-0 overflow-x-hidden border-r border-bg-border/80 bg-bg-surface/85 backdrop-blur-md transition-[width] duration-200 ease-out ${
         collapsed ? 'w-[4.5rem]' : 'w-60'
       }`}
     >

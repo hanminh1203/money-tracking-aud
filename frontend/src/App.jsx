@@ -31,7 +31,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-dvh md:flex md:items-stretch">
+    <div className="h-dvh flex flex-col md:flex-row overflow-hidden">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:top-2 focus:left-2 focus:px-3 focus:py-2 focus:rounded-lg focus:bg-bg-surface focus:text-text-primary focus:shadow-soft"
@@ -40,23 +40,23 @@ export default function App() {
       </a>
       <NavBar onSignOut={signOut} />
 
-      <main
-        id="main-content"
-        className="flex-1 min-w-0 w-full px-4 sm:px-6 lg:px-8 py-5 sm:py-6 pb-[max(1.25rem,env(safe-area-inset-bottom))]"
-      >
+      <main id="main-content" className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
         {error && (
-          <div className="mb-5 p-4 rounded-xl border border-expense/30 bg-expense/5 text-expense text-sm">
-            Failed to load data: {error}
-            {error.toLowerCase().includes('permission') && (
-              <> — make sure this Google account has at least Viewer access to the spreadsheet.</>
-            )}
+          <div className="shrink-0 px-4 sm:px-6 lg:px-8 pt-5">
+            <div className="p-4 rounded-xl border border-expense/30 bg-expense/5 text-expense text-sm">
+              Failed to load data: {error}
+              {error.toLowerCase().includes('permission') && (
+                <> — make sure this Google account has at least Viewer access to the spreadsheet.</>
+              )}
+            </div>
           </div>
         )}
 
-        {!skipLoading && listVersion === 0 && !error ? (
-          <LoadingState />
-        ) : (
-          <Routes>
+        <div className="flex-1 min-h-0 [&>*]:h-full">
+          {!skipLoading && listVersion === 0 && !error ? (
+            <LoadingState />
+          ) : (
+            <Routes>
             <Route path="/" element={<Dashboard data={dashboard} />} />
             <Route
               path="/sources"
@@ -91,7 +91,8 @@ export default function App() {
             <Route path="/management" element={<Management />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        )}
+          )}
+        </div>
       </main>
     </div>
   );
@@ -99,7 +100,7 @@ export default function App() {
 
 function LoadingState() {
   return (
-    <div className="space-y-5">
+    <div className="h-full min-h-0 overflow-y-auto scrollbar-thin px-4 sm:px-6 lg:px-8 py-5 space-y-5">
       <div className="h-14 rounded-xl bg-bg-surface border border-bg-border animate-pulse" />
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
         {[...Array(4)].map((_, i) => (

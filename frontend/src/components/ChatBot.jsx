@@ -77,13 +77,13 @@ export default function ChatBot({ metadata, onSaved }) {
   }
 
   return (
-    <div className="space-y-5 max-w-2xl mx-auto">
-      <PageHeader
-        title="Assistant"
-        description="Describe a purchase or transfer in plain language and I will log it."
-      />
-      <Card title="Conversation" className="flex flex-col h-[min(70dvh,32rem)] sm:h-[70vh]">
-        <div className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin space-y-3 pr-1">
+    <PageHeader
+      title="Assistant"
+      description="Describe a purchase or transfer in plain language and I will log it."
+      fill
+    >
+      <Card title="Conversation" className="flex flex-col flex-1 min-h-0 max-w-2xl w-full overflow-hidden">
+        <div className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin space-y-3 pr-1 min-h-0">
           {messages.map((m, i) => (
             <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div
@@ -109,7 +109,7 @@ export default function ChatBot({ metadata, onSaved }) {
           <div ref={bottomRef} />
         </div>
 
-        <form onSubmit={handleSend} className="mt-4 flex flex-col min-[400px]:flex-row gap-2">
+        <form onSubmit={handleSend} className="mt-4 shrink-0 flex flex-col min-[400px]:flex-row gap-2">
           <input
             type="text"
             value={input}
@@ -123,6 +123,6 @@ export default function ChatBot({ metadata, onSaved }) {
           </button>
         </form>
       </Card>
-    </div>
+    </PageHeader>
   );
 }

@@ -62,11 +62,11 @@ export default function Sources({ transactions, metadata, listVersion }) {
   }
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Sources"
-        description="Balances by account or wallet. Select one to browse its history."
-      />
+    <PageHeader
+      title="Sources"
+      description="Balances by account or wallet. Select one to browse its history."
+    >
+      <div className="space-y-5">
 
       <Card title="Balances by Source">
         <SourceGrid
@@ -98,5 +98,6 @@ export default function Sources({ transactions, metadata, listVersion }) {
         )}
       </Card>
     </div>
+    </PageHeader>
   );
 }

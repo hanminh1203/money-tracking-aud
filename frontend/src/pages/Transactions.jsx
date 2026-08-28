@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import Card from '../components/Card';
 import Modal from '../components/Modal';
-import PageHeader from '../components/PageHeader';
+import PageHeader, { PageActions } from '../components/PageHeader';
 import TransactionList from '../components/TransactionList';
 import AddTransactionForm from '../components/AddTransactionForm';
 import TransferForm from '../components/TransferForm';
@@ -48,24 +48,22 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
   }
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Transactions"
-        description="Record spending, income, transfers, and receipts."
-        action={
-          <>
-            <button type="button" onClick={() => setModal('add')} className="btn-primary">
-              Add Transaction
-            </button>
-            <button type="button" onClick={() => setModal('transfer')} className="btn-secondary">
-              Transfers
-            </button>
-            <button type="button" onClick={() => setModal('receipt')} className="btn-secondary">
-              Add Receipt
-            </button>
-          </>
-        }
-      />
+    <PageHeader
+      title="Transactions"
+      description="Record spending, income, transfers, and receipts."
+    >
+      <div className="space-y-5">
+      <PageActions>
+        <button type="button" onClick={() => setModal('add')} className="btn-primary">
+          Add Transaction
+        </button>
+        <button type="button" onClick={() => setModal('transfer')} className="btn-secondary">
+          Transfers
+        </button>
+        <button type="button" onClick={() => setModal('receipt')} className="btn-secondary">
+          Add Receipt
+        </button>
+      </PageActions>
 
       <Card title="All Transactions">
         {error && <div className="mb-3 text-sm text-expense">{error}</div>}
@@ -102,5 +100,6 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
         </Modal>
       )}
     </div>
+    </PageHeader>
   );
 }
