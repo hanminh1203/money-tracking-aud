@@ -31,10 +31,19 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-dvh md:flex md:items-stretch">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:top-2 focus:left-2 focus:px-3 focus:py-2 focus:rounded-lg focus:bg-bg-surface focus:text-text-primary focus:shadow-soft"
+      >
+        Skip to content
+      </a>
       <NavBar onSignOut={signOut} />
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-6 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+      <main
+        id="main-content"
+        className="flex-1 min-w-0 w-full px-4 sm:px-6 lg:px-8 py-5 sm:py-6 pb-[max(1.25rem,env(safe-area-inset-bottom))]"
+      >
         {error && (
           <div className="mb-5 p-4 rounded-xl border border-expense/30 bg-expense/5 text-expense text-sm">
             Failed to load data: {error}
