@@ -4,9 +4,20 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 
-from finance.db_reader import get_dashboard_data
+from finance.db_reader import ReaderError, get_dashboard_data, get_product_detail, get_products, get_transaction
 from finance.db_sync import sync_from_sheets
-from finance.models import Category, Giftcard, Source, Transaction, User
+from finance.models import (
+    Category,
+    Giftcard,
+    Product,
+    ProductItem,
+    Receipt,
+    ReceiptItem,
+    Source,
+    Transaction,
+    User,
+)
+from finance.sheets_client import SheetsClient, SheetsError
 
 
 class DashboardDataTests(TestCase):
@@ -191,6 +202,8 @@ class SyncIsolationTests(TestCase):
             'receipts': [],
             'receipt_items': [],
             'giftcards': [],
+            'products': [],
+            'product_items': [],
         }
 
         result = sync_from_sheets(client, user=self.user_a)
@@ -202,3 +215,434 @@ class SyncIsolationTests(TestCase):
         self.assertEqual(Giftcard.objects.filter(user=self.user_b).count(), 1)
         self.assertEqual(Source.objects.count(), 1)
         self.assertEqual(Category.objects.count(), 1)
+
+
+class TransactionDetailTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='detail@example.com')
+        self.other = User.objects.create(email='other-detail@example.com')
+        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+
+    def add_transaction(self, **kwargs):
+        defaults = {
+            'user': self.user,
+            'row_number': 1,
+            'date': date(2026, 1, 8),
+            'change': Decimal('-42.50'),
+            'source': self.source,
+            'category': self.groceries,
+            'comment': 'Woolworths : weekly shop',
+        }
+        defaults.update(kwargs)
+        return Transaction.objects.create(**defaults)
+
+    def test_get_transaction_without_receipt(self):
+        tx = self.add_transaction()
+
+        data = get_transaction(user=self.user, transaction_id=str(tx.id))
+
+        self.assertEqual(data['id'], str(tx.id))
+        self.assertEqual(data['date'], '2026-01-08')
+        self.assertEqual(data['change'], -42.5)
+        self.assertEqual(data['source'], 'Everyday')
+        self.assertEqual(data['subCategory'], 'Groceries')
+        self.assertEqual(data['mainCategory'], 'Living')
+        self.assertEqual(data['type'], 'Expense')
+        self.assertEqual(data['comment'], 'Woolworths : weekly shop')
+        self.assertIsNone(data['receiptId'])
+        self.assertIsNone(data['receipt'])
+
+    def test_get_transaction_with_receipt_items(self):
+        receipt = Receipt.objects.create(
+            user=self.user,
+            date=date(2026, 1, 8),
+            total=Decimal('12.50'),
+        )
+        milk = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Milk',
+            amount=Decimal('2'),
+            unit='L',
+            money=Decimal('4.50'),
+        )
+        bread = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Bread',
+            amount=Decimal('1'),
+            unit='loaf',
+            money=Decimal('8.00'),
+        )
+        tx = self.add_transaction(receipt=receipt)
+
+        data = get_transaction(user=self.user, transaction_id=str(tx.id))
+
+        self.assertEqual(data['receiptId'], str(receipt.id))
+        self.assertEqual(data['receipt']['receiptId'], str(receipt.id))
+        self.assertEqual(data['receipt']['total'], 12.5)
+        self.assertEqual(
+            data['receipt']['items'],
+            [
+                {
+                    'id': str(milk.id),
+                    'name': 'Milk',
+                    'amount': 2.0,
+                    'unit': 'L',
+                    'money': 4.5,
+                },
+                {
+                    'id': str(bread.id),
+                    'name': 'Bread',
+                    'amount': 1.0,
+                    'unit': 'loaf',
+                    'money': 8.0,
+                },
+            ],
+        )
+
+    def test_get_transaction_not_found(self):
+        with self.assertRaises(ReaderError) as ctx:
+            get_transaction(
+                user=self.user,
+                transaction_id='00000000-0000-0000-0000-000000000001',
+            )
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_get_transaction_hides_other_user_rows(self):
+        tx = self.add_transaction(user=self.other, row_number=2)
+
+        with self.assertRaises(ReaderError) as ctx:
+            get_transaction(user=self.user, transaction_id=str(tx.id))
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_get_transaction_invalid_uuid(self):
+        with self.assertRaises(ReaderError) as ctx:
+            get_transaction(user=self.user, transaction_id='not-a-uuid')
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_get_transaction_requires_id(self):
+        with self.assertRaises(ReaderError) as ctx:
+            get_transaction(user=self.user, transaction_id='  ')
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_detail_api_requires_authentication(self):
+        response = self.client.get(
+            '/api/transactions/00000000-0000-0000-0000-000000000001'
+        )
+        self.assertEqual(response.status_code, 401)
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_detail_api_returns_payload(self, _access_token, get_user):
+        get_user.return_value = self.user
+        tx = self.add_transaction()
+
+        response = self.client.get(f'/api/transactions/{tx.id}')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['id'], str(tx.id))
+        self.assertEqual(payload['source'], 'Everyday')
+        self.assertIsNone(payload['receipt'])
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_detail_api_returns_404_for_missing(self, _access_token, get_user):
+        get_user.return_value = self.user
+
+        response = self.client.get(
+            '/api/transactions/00000000-0000-0000-0000-000000000001'
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['error'], 'Transaction not found')
+
+    def test_update_transaction_detail_without_receipt(self):
+        from finance.db_writer import update_transaction_detail
+
+        tx = self.add_transaction()
+        salary = Category.objects.create(
+            main_category='Earnings',
+            sub_category='Salary',
+            type='Income',
+        )
+        savings = Source.objects.create(name='Savings', type='Bank')
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-02-01',
+            change='150.00',
+            source='Savings',
+            comment='Pay',
+            sub_category='Salary',
+        )
+
+        tx.refresh_from_db()
+        self.assertEqual(tx.date, date(2026, 2, 1))
+        self.assertEqual(tx.change, Decimal('150.00'))
+        self.assertEqual(tx.source_id, savings.id)
+        self.assertEqual(tx.comment, 'Pay')
+        self.assertEqual(tx.category_id, salary.id)
+        self.assertEqual(tx.version, 2)
+
+    def test_update_transaction_detail_replaces_receipt_items(self):
+        from finance.db_writer import update_transaction_detail
+
+        receipt = Receipt.objects.create(
+            user=self.user,
+            date=date(2026, 1, 8),
+            total=Decimal('12.50'),
+        )
+        ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Milk',
+            amount=Decimal('2'),
+            unit='L',
+            money=Decimal('4.50'),
+        )
+        tx = self.add_transaction(receipt=receipt)
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-09',
+            change='-10.00',
+            source='Everyday',
+            comment='Coles : restock',
+            sub_category='Groceries',
+            receipt_total='10.00',
+            items=[
+                {'name': 'Eggs', 'amount': 12, 'unit': 'piece', 'money': 10},
+            ],
+        )
+
+        tx.refresh_from_db()
+        receipt.refresh_from_db()
+        items = list(receipt.items.order_by('name'))
+        self.assertEqual(tx.date, date(2026, 1, 9))
+        self.assertEqual(tx.change, Decimal('-10.00'))
+        self.assertEqual(tx.comment, 'Coles : restock')
+        self.assertEqual(receipt.date, date(2026, 1, 9))
+        self.assertEqual(receipt.total, Decimal('10.00'))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].name, 'Eggs')
+        self.assertEqual(items[0].money, Decimal('10'))
+
+    @patch('finance.api_views.sheets_for')
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_detail_api_put_updates_transaction(self, _access_token, get_user, sheets_for):
+        get_user.return_value = self.user
+        tx = self.add_transaction()
+        client = MagicMock()
+        client.update_transaction.return_value = {
+            'id': str(tx.id),
+            'updated': 1,
+            'receiptUpdated': False,
+            'items': 0,
+        }
+        sheets_for.return_value = client
+
+        response = self.client.put(
+            f'/api/transactions/{tx.id}',
+            data={
+                'date': '2026-02-01',
+                'amount': 20,
+                'type': 'Expense',
+                'source': 'Everyday',
+                'subCategory': 'Groceries',
+                'comment': 'Updated',
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        client.update_transaction.assert_called_once()
+        kwargs = client.update_transaction.call_args.kwargs
+        self.assertEqual(kwargs['date'], '2026-02-01')
+        self.assertEqual(kwargs['amount'], 20)
+        self.assertEqual(kwargs['comment'], 'Updated')
+        self.assertIsNone(kwargs['items'])
+
+    def test_detail_api_put_requires_authentication(self):
+        response = self.client.put(
+            '/api/transactions/00000000-0000-0000-0000-000000000001',
+            data={},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_update_requires_items_when_receipt_linked(self):
+        receipt = Receipt.objects.create(
+            user=self.user,
+            date=date(2026, 1, 8),
+            total=Decimal('12.50'),
+        )
+        tx = self.add_transaction(receipt=receipt)
+        client = SheetsClient('token', 'sheet-id', user=self.user)
+
+        with self.assertRaises(SheetsError) as ctx:
+            client.update_transaction(
+                str(tx.id),
+                date='2026-01-08',
+                amount=12.5,
+                type='Expense',
+                source='Everyday',
+                sub_category='Groceries',
+                comment='Woolworths : weekly shop',
+            )
+        self.assertIn('items are required', str(ctx.exception))
+
+    def test_update_rejects_item_total_mismatch(self):
+        receipt = Receipt.objects.create(
+            user=self.user,
+            date=date(2026, 1, 8),
+            total=Decimal('12.50'),
+        )
+        tx = self.add_transaction(receipt=receipt)
+        client = SheetsClient('token', 'sheet-id', user=self.user)
+
+        with self.assertRaises(SheetsError) as ctx:
+            client.update_transaction(
+                str(tx.id),
+                date='2026-01-08',
+                amount=12.5,
+                type='Expense',
+                source='Everyday',
+                sub_category='Groceries',
+                comment='Woolworths : weekly shop',
+                items=[{'name': 'Milk', 'amount': 1, 'unit': 'L', 'money': 4.5}],
+            )
+        self.assertIn('must equal items total', str(ctx.exception))
+
+    def test_update_rejects_items_when_not_receipt_linked(self):
+        tx = self.add_transaction()
+        client = SheetsClient('token', 'sheet-id', user=self.user)
+
+        with self.assertRaises(SheetsError) as ctx:
+            client.update_transaction(
+                str(tx.id),
+                date='2026-01-08',
+                amount=12.5,
+                type='Expense',
+                source='Everyday',
+                sub_category='Groceries',
+                comment='Note',
+                items=[{'name': 'Milk', 'amount': 1, 'unit': 'L', 'money': 12.5}],
+            )
+        self.assertIn('not linked to a receipt', str(ctx.exception))
+
+
+class ProductTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='products@example.com')
+        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.product = Product.objects.create(user=self.user, name='Toothpaste')
+
+    def add_transaction(self, row, value, amount, comment=''):
+        return Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=value,
+            change=Decimal(amount),
+            source=self.source,
+            category=self.groceries,
+            comment=comment,
+        )
+
+    def test_product_item_requires_price_for_transaction_link(self):
+        tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
+        with self.assertRaises(Exception):
+            ProductItem.objects.create(
+                user=self.user,
+                product=self.product,
+                transaction=tx,
+                price=None,
+            )
+
+    def test_product_item_xor_link_constraint(self):
+        tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
+        receipt = Receipt.objects.create(user=self.user, date=date(2026, 1, 1), total=Decimal('8.50'))
+        item = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Paste',
+            amount=Decimal('1'),
+            unit='tube',
+            money=Decimal('8.50'),
+        )
+        with self.assertRaises(Exception):
+            ProductItem.objects.create(
+                user=self.user,
+                product=self.product,
+                transaction=tx,
+                receipt_item=item,
+                price=Decimal('8.50'),
+            )
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 31))
+    def test_product_detail_stats(self, _localdate):
+        tx1 = self.add_transaction(1, date(2026, 1, 1), '-10.00')
+        tx2 = self.add_transaction(2, date(2026, 1, 21), '-12.00')
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx1,
+            price=Decimal('10.00'),
+        )
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx2,
+            price=Decimal('12.00'),
+        )
+
+        detail = get_product_detail(user=self.user, product_id=str(self.product.id))
+        self.assertEqual(detail['stats']['totalPurchases'], 2)
+        self.assertEqual(detail['stats']['totalSpent'], 22.0)
+        self.assertEqual(detail['stats']['lastPurchaseDate'], '2026-01-21')
+        self.assertEqual(detail['stats']['avgDaysBetweenPurchases'], 20.0)
+        self.assertAlmostEqual(detail['stats']['costPerDay'], 12.0 / 10)
+
+    def test_get_products_list(self):
+        tx = self.add_transaction(1, date(2026, 1, 10), '-5.00')
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx,
+            price=Decimal('5.00'),
+        )
+        rows = get_products(user=self.user)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['name'], 'Toothpaste')
+        self.assertEqual(rows[0]['purchaseCount'], 1)
+
+    @patch('finance.api_views.sheets_for')
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_create_product_api(self, _access_token, get_user, sheets_for):
+        get_user.return_value = self.user
+        client = MagicMock()
+        client.add_product.return_value = {'productId': 'abc', 'name': 'Shampoo'}
+        sheets_for.return_value = client
+
+        response = self.client.post(
+            '/api/products',
+            data={'name': 'Shampoo'},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        client.add_product.assert_called_once_with(name='Shampoo')

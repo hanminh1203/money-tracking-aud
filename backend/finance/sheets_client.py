@@ -16,7 +16,7 @@ BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
 INPUT_COLUMNS = ['Date', 'Change', 'Source', 'Comment', 'Sub category']
 RECEIPT_COLUMNS = ['Receipt ID', 'Date', 'Total']
-RECEIPT_ITEM_COLUMNS = ['Receipt ID', 'Name', 'Amount', 'Unit', 'Money']
+RECEIPT_ITEM_COLUMNS = ['Receipt Item ID', 'Receipt ID', 'Name', 'Amount', 'Unit', 'Money']
 RECEIPT_TX_COLUMNS = [
     'Date',
     'Change',
@@ -26,6 +26,14 @@ RECEIPT_TX_COLUMNS = [
     'Receipt ID',
 ]
 GIFTCARD_COLUMNS = ['Giftcard ID', 'Shop', 'Date', 'Balance']
+PRODUCT_COLUMNS = ['Product ID', 'Name']
+PRODUCT_ITEM_COLUMNS = [
+    'Product Item ID',
+    'Product ID',
+    'Price',
+    'Transaction Row',
+    'Receipt Item ID',
+]
 # Giftcard ID sits after Receipt ID so columns stay contiguous in the sheet table.
 GIFTCARD_TX_COLUMNS = [
     'Date',
@@ -57,6 +65,10 @@ EXPORT_COLUMN_FORMATS: dict[str, dict[str, dict[str, str]]] = {
     },
     'receipt_items': {
         'Money': EXPORT_AUD_CURRENCY,
+    },
+    'products': {},
+    'product_items': {
+        'Price': EXPORT_AUD_CURRENCY,
     },
 }
 
@@ -183,6 +195,8 @@ class SheetsClient:
             'giftcards',
             'receipt',
             'receipt_items',
+            'products',
+            'product_items',
             'category',
             'sources',
         )
@@ -461,22 +475,28 @@ class SheetsClient:
         return rows
 
     def get_mirror_source_rows(self) -> dict[str, list[dict]]:
-        """Read user-owned mirror tables (Transactions, Receipt, Receipt_Items, Giftcard)."""
+        """Read user-owned mirror tables."""
         tx_table = self.get_table(settings.TRANSACTIONS_TABLE)
         receipt_table = self.get_table(settings.RECEIPT_TABLE)
         items_table = self.get_table(settings.RECEIPT_ITEMS_TABLE)
         giftcard_table = self.get_table(settings.GIFTCARD_TABLE)
+        product_table = self.get_table(settings.PRODUCT_TABLE)
+        product_items_table = self.get_table(settings.PRODUCT_ITEMS_TABLE)
         (
             tx_vals,
             receipt_vals,
             item_vals,
             giftcard_vals,
+            product_vals,
+            product_item_vals,
         ) = self.batch_get_values(
             [
                 self.data_range_a1(tx_table),
                 self.data_range_a1(receipt_table),
                 self.data_range_a1(items_table),
                 self.data_range_a1(giftcard_table),
+                self.data_range_a1(product_table),
+                self.data_range_a1(product_items_table),
             ]
         )
         return {
@@ -484,6 +504,8 @@ class SheetsClient:
             'receipts': self._rows_as_dicts(receipt_table, receipt_vals),
             'receipt_items': self._rows_as_dicts(items_table, item_vals),
             'giftcards': self._rows_as_dicts(giftcard_table, giftcard_vals),
+            'products': self._rows_as_dicts(product_table, product_vals),
+            'product_items': self._rows_as_dicts(product_items_table, product_item_vals),
         }
 
     def update_table_cell_at_row(
@@ -541,6 +563,83 @@ class SheetsClient:
             update_column=update_column,
             new_value=new_value,
         )
+
+    def find_matching_sheet_rows(
+        self,
+        table_name: str,
+        *,
+        match_column: str,
+        match_value: str,
+    ) -> list[int]:
+        """Return 1-based sheet row numbers whose column equals match_value."""
+        table = self.get_table(table_name)
+        headers = [c['name'] for c in table['columns']]
+        match_idx = self.find_col(headers, rf'^{re.escape(match_column)}$')
+        if match_idx < 0:
+            raise SheetsError(f'Column "{match_column}" not found in table "{table_name}"')
+
+        values = self.get_values(self.data_range_a1(table))
+        start_row = table['range']['startRowIndex'] + 2
+        rows: list[int] = []
+        for i, row in enumerate(values):
+            cell = row[match_idx] if match_idx < len(row) else None
+            if str(cell or '').strip() == str(match_value).strip():
+                rows.append(start_row + i)
+        return rows
+
+    def update_table_row_at(
+        self,
+        table_name: str,
+        *,
+        sheet_row: int,
+        values_by_column: dict[str, Any],
+    ) -> None:
+        """Update multiple cells in a sheet table row in one batch request."""
+        if not values_by_column:
+            return
+        table = self.get_table(table_name)
+        data = []
+        for name, value in values_by_column.items():
+            col = next((c for c in table['columns'] if c['name'] == name), None)
+            if not col:
+                raise SheetsError(f'Column "{name}" not found in table "{table_name}"')
+            col_letter = column_letter(col['index'])
+            a1 = f"{quote_sheet_title(table['sheetTitle'])}!{col_letter}{int(sheet_row)}"
+            data.append({'range': a1, 'values': [[value]]})
+        self.request(
+            '/values:batchUpdate',
+            method='POST',
+            json_body={
+                'valueInputOption': 'USER_ENTERED',
+                'data': data,
+            },
+        )
+
+    def delete_table_rows_at(self, table_name: str, sheet_rows: list[int]) -> None:
+        """Delete table cells for the given 1-based sheet rows, shifting remaining cells up."""
+        if not sheet_rows:
+            return
+        table = self.get_table(table_name)
+        rng = table['range']
+        sheet_id = table['sheetId']
+        requests = []
+        for row in sorted({int(r) for r in sheet_rows}, reverse=True):
+            requests.append(
+                {
+                    'deleteRange': {
+                        'range': {
+                            'sheetId': sheet_id,
+                            'startRowIndex': row - 1,
+                            'endRowIndex': row,
+                            'startColumnIndex': rng['startColumnIndex'],
+                            'endColumnIndex': rng['endColumnIndex'],
+                        },
+                        'shiftDimension': 'ROWS',
+                    }
+                }
+            )
+        self.request(':batchUpdate', method='POST', json_body={'requests': requests})
+        self._tables_cache = None
 
     def append_rows(self, table_name: str, column_names: list[str], rows: list[list]) -> list[int]:
         """Append rows; return 1-based sheet row numbers for each appended row."""
@@ -712,8 +811,15 @@ class SheetsClient:
                 raise SheetsError(f'Item {i + 1}: unit is required')
             if not money:
                 raise SheetsError(f'Item {i + 1}: invalid money')
+            item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
             normalized_items.append(
-                {'name': name, 'amount': amount, 'unit': unit, 'money': money}
+                {
+                    'id': item_id,
+                    'name': name,
+                    'amount': amount,
+                    'unit': unit,
+                    'money': money,
+                }
             )
 
         normalized_sources = []
@@ -746,7 +852,7 @@ class SheetsClient:
             settings.RECEIPT_ITEMS_TABLE,
             RECEIPT_ITEM_COLUMNS,
             [
-                [receipt_id, it['name'], it['amount'], it['unit'], it['money']]
+                [it['id'], receipt_id, it['name'], it['amount'], it['unit'], it['money']]
                 for it in normalized_items
             ],
         )
@@ -783,6 +889,201 @@ class SheetsClient:
             'total': total,
             'items': len(normalized_items),
             'transactions': len(normalized_sources),
+        }
+
+    def update_transaction(
+        self,
+        transaction_id: str,
+        *,
+        date: str,
+        amount: Any,
+        type: str,
+        source: str,
+        sub_category: str = '',
+        comment: str = '',
+        items: list[dict] | None = None,
+    ) -> dict:
+        from django.core.exceptions import ValidationError
+        from finance.models import Transaction
+
+        tid = str(transaction_id or '').strip()
+        if not tid:
+            raise SheetsError('Transaction ID is required')
+        if not date:
+            raise SheetsError('Date is required')
+        payment_source = str(source or '').strip()
+        if not payment_source:
+            raise SheetsError('Source is required')
+        try:
+            abs_amt = abs(float(amount))
+        except (TypeError, ValueError):
+            raise SheetsError('Invalid amount')
+        if not abs_amt:
+            raise SheetsError('Invalid amount')
+
+        tx_type = str(type or '').strip()
+        if tx_type not in ('Expense', 'Income'):
+            raise SheetsError('Type must be Expense or Income')
+        signed = -abs_amt if tx_type == 'Expense' else abs_amt
+        category = str(sub_category or '').strip()
+        note = str(comment or '')
+
+        try:
+            tx = (
+                Transaction.objects.filter(user=self.user)
+                .select_related('receipt')
+                .prefetch_related('receipt__transactions')
+                .get(pk=tid)
+            )
+        except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
+            raise SheetsError('Transaction not found', status=404) from exc
+
+        normalized_items = None
+        total = None
+        siblings: list = []
+        if tx.receipt_id:
+            if items is None:
+                raise SheetsError('items are required for a receipt-linked transaction')
+            normalized_items = []
+            for i, it in enumerate(items):
+                name = str(it.get('name') or '').strip()
+                raw_amount = it.get('amount')
+                try:
+                    item_amount = float(raw_amount) if raw_amount not in (None, '') else 0.0
+                except (TypeError, ValueError):
+                    raise SheetsError(f'Item {i + 1}: invalid amount')
+                unit = str(it.get('unit') or '').strip()
+                try:
+                    money = abs(float(it.get('money')))
+                except (TypeError, ValueError):
+                    raise SheetsError(f'Item {i + 1}: invalid money')
+                if not name:
+                    raise SheetsError(f'Item {i + 1}: name is required')
+                if not unit:
+                    raise SheetsError(f'Item {i + 1}: unit is required')
+                if not money:
+                    raise SheetsError(f'Item {i + 1}: invalid money')
+                item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
+                normalized_items.append(
+                    {
+                        'id': item_id,
+                        'name': name,
+                        'amount': item_amount,
+                        'unit': unit,
+                        'money': money,
+                    }
+                )
+            if not normalized_items:
+                raise SheetsError('At least one item is required')
+            total = round(sum(it['money'] for it in normalized_items) * 100) / 100
+            siblings = [s for s in tx.receipt.transactions.all() if s.id != tx.id]
+            sibling_total = round(sum(abs(float(s.change)) for s in siblings) * 100) / 100
+            if abs(total - (abs_amt + sibling_total)) > 0.009:
+                raise SheetsError(
+                    f'Source amounts ({round((abs_amt + sibling_total) * 100) / 100}) '
+                    f'must equal items total ({total})'
+                )
+        elif items:
+            raise SheetsError('This transaction is not linked to a receipt')
+
+        self.update_table_row_at(
+            settings.TRANSACTIONS_TABLE,
+            sheet_row=tx.row_number,
+            values_by_column={
+                'Date': date,
+                'Change': signed,
+                'Source': payment_source,
+                'Comment': note,
+                'Sub category': category,
+            },
+        )
+
+        for sibling in siblings:
+            self.update_table_row_at(
+                settings.TRANSACTIONS_TABLE,
+                sheet_row=sibling.row_number,
+                values_by_column={
+                    'Date': date,
+                    'Comment': note,
+                    'Sub category': category,
+                },
+            )
+
+        if tx.receipt_id:
+            receipt_rows = self.find_matching_sheet_rows(
+                settings.RECEIPT_TABLE,
+                match_column='Receipt ID',
+                match_value=str(tx.receipt_id),
+            )
+            if not receipt_rows:
+                raise SheetsError('Receipt not found in spreadsheet')
+            self.update_table_row_at(
+                settings.RECEIPT_TABLE,
+                sheet_row=receipt_rows[0],
+                values_by_column={'Date': date, 'Total': total},
+            )
+
+            item_rows = self.find_matching_sheet_rows(
+                settings.RECEIPT_ITEMS_TABLE,
+                match_column='Receipt ID',
+                match_value=str(tx.receipt_id),
+            )
+            rid = str(tx.receipt_id)
+            overlapping = min(len(item_rows), len(normalized_items or []))
+            for i in range(overlapping):
+                it = normalized_items[i]
+                item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
+                it['id'] = item_id
+                self.update_table_row_at(
+                    settings.RECEIPT_ITEMS_TABLE,
+                    sheet_row=item_rows[i],
+                    values_by_column={
+                        'Receipt Item ID': item_id,
+                        'Receipt ID': rid,
+                        'Name': it['name'],
+                        'Amount': it['amount'],
+                        'Unit': it['unit'],
+                        'Money': it['money'],
+                    },
+                )
+            extra_new = (normalized_items or [])[overlapping:]
+            if extra_new:
+                self.append_rows(
+                    settings.RECEIPT_ITEMS_TABLE,
+                    RECEIPT_ITEM_COLUMNS,
+                    [
+                        [
+                            str(it.get('id') or uuid.uuid4()),
+                            rid,
+                            it['name'],
+                            it['amount'],
+                            it['unit'],
+                            it['money'],
+                        ]
+                        for it in extra_new
+                    ],
+                )
+            extra_old = item_rows[overlapping:]
+            if extra_old:
+                self.delete_table_rows_at(settings.RECEIPT_ITEMS_TABLE, extra_old)
+
+        db_writer.update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date=date,
+            change=signed,
+            source=payment_source,
+            comment=note,
+            sub_category=category,
+            receipt_total=total,
+            items=normalized_items,
+            sibling_updates=siblings,
+        )
+        return {
+            'id': str(tx.id),
+            'updated': 1,
+            'receiptUpdated': bool(tx.receipt_id),
+            'items': len(normalized_items or []),
         }
 
     def buy_giftcard(
@@ -936,3 +1237,163 @@ class SheetsClient:
             'balance': new_balance,
             'transactions': 1,
         }
+
+    def add_product(self, *, name: str) -> dict:
+        product_name = str(name or '').strip()
+        if not product_name:
+            raise SheetsError('Name is required')
+        product_id = str(uuid.uuid4())
+        self.append_rows(
+            settings.PRODUCT_TABLE,
+            PRODUCT_COLUMNS,
+            [[product_id, product_name]],
+        )
+        db_writer.save_product(user=self.user, product_id=product_id, name=product_name)
+        return {'productId': product_id, 'name': product_name}
+
+    def update_product(self, *, product_id: str, name: str) -> dict:
+        pid = str(product_id or '').strip()
+        if not pid:
+            raise SheetsError('Product ID is required')
+        product_name = str(name or '').strip()
+        if not product_name:
+            raise SheetsError('Name is required')
+        rows = self.find_matching_sheet_rows(
+            settings.PRODUCT_TABLE,
+            match_column='Product ID',
+            match_value=pid,
+        )
+        if not rows:
+            raise SheetsError('Product not found', status=404)
+        self.update_table_row_at(
+            settings.PRODUCT_TABLE,
+            sheet_row=rows[0],
+            values_by_column={'Name': product_name},
+        )
+        db_writer.update_product(user=self.user, product_id=pid, name=product_name)
+        return {'productId': pid, 'name': product_name}
+
+    def delete_product(self, *, product_id: str) -> dict:
+        from finance.models import Product, ProductItem
+
+        pid = str(product_id or '').strip()
+        if not pid:
+            raise SheetsError('Product ID is required')
+        try:
+            product = Product.objects.get(pk=pid, user=self.user)
+        except (Product.DoesNotExist, ValueError) as exc:
+            raise SheetsError('Product not found', status=404) from exc
+
+        item_rows = self.find_matching_sheet_rows(
+            settings.PRODUCT_ITEMS_TABLE,
+            match_column='Product ID',
+            match_value=pid,
+        )
+        if item_rows:
+            self.delete_table_rows_at(settings.PRODUCT_ITEMS_TABLE, item_rows)
+
+        product_rows = self.find_matching_sheet_rows(
+            settings.PRODUCT_TABLE,
+            match_column='Product ID',
+            match_value=pid,
+        )
+        if not product_rows:
+            raise SheetsError('Product not found in spreadsheet', status=404)
+        self.delete_table_rows_at(settings.PRODUCT_TABLE, product_rows)
+
+        ProductItem.objects.filter(user=self.user, product=product).delete()
+        db_writer.delete_product(user=self.user, product_id=pid)
+        return {'productId': pid, 'deleted': True}
+
+    def add_product_item(
+        self,
+        *,
+        product_id: str,
+        transaction_id: str | None = None,
+        receipt_item_id: str | None = None,
+        price: Any = None,
+    ) -> dict:
+        from finance.models import Product, ReceiptItem, Transaction
+
+        pid = str(product_id or '').strip()
+        if not pid:
+            raise SheetsError('Product ID is required')
+        tx_id = str(transaction_id or '').strip() or None
+        ri_id = str(receipt_item_id or '').strip() or None
+        if bool(tx_id) == bool(ri_id):
+            raise SheetsError('Link to transaction or receipt item is required')
+
+        try:
+            Product.objects.get(pk=pid, user=self.user)
+        except (Product.DoesNotExist, ValueError) as exc:
+            raise SheetsError('Product not found', status=404) from exc
+
+        tx_row = ''
+        sheet_price = ''
+        if tx_id:
+            try:
+                tx = Transaction.objects.get(pk=tx_id, user=self.user)
+            except (Transaction.DoesNotExist, ValueError) as exc:
+                raise SheetsError('Transaction not found', status=404) from exc
+            if price is None:
+                raise SheetsError('Price is required when linking a transaction')
+            try:
+                sheet_price = abs(float(price))
+            except (TypeError, ValueError):
+                raise SheetsError('Invalid price')
+            if not sheet_price:
+                raise SheetsError('Invalid price')
+            tx_row = str(tx.row_number)
+        else:
+            try:
+                ReceiptItem.objects.get(pk=ri_id, user=self.user)
+            except (ReceiptItem.DoesNotExist, ValueError) as exc:
+                raise SheetsError('Receipt item not found', status=404) from exc
+            if price is not None:
+                try:
+                    sheet_price = abs(float(price))
+                except (TypeError, ValueError):
+                    raise SheetsError('Invalid price')
+
+        product_item_id = str(uuid.uuid4())
+        self.append_rows(
+            settings.PRODUCT_ITEMS_TABLE,
+            PRODUCT_ITEM_COLUMNS,
+            [[product_item_id, pid, sheet_price, tx_row, ri_id or '']],
+        )
+        db_writer.save_product_item(
+            user=self.user,
+            product_item_id=product_item_id,
+            product_id=pid,
+            price=sheet_price if sheet_price != '' else None,
+            transaction_id=tx_id,
+            receipt_item_id=ri_id,
+        )
+        return {
+            'productItemId': product_item_id,
+            'productId': pid,
+            'transactionId': tx_id,
+            'receiptItemId': ri_id,
+            'price': sheet_price if sheet_price != '' else None,
+        }
+
+    def delete_product_item(self, *, product_item_id: str) -> dict:
+        from finance.models import ProductItem
+
+        pi_id = str(product_item_id or '').strip()
+        if not pi_id:
+            raise SheetsError('Product Item ID is required')
+        try:
+            ProductItem.objects.get(pk=pi_id, user=self.user)
+        except (ProductItem.DoesNotExist, ValueError) as exc:
+            raise SheetsError('Product item not found', status=404) from exc
+
+        rows = self.find_matching_sheet_rows(
+            settings.PRODUCT_ITEMS_TABLE,
+            match_column='Product Item ID',
+            match_value=pi_id,
+        )
+        if rows:
+            self.delete_table_rows_at(settings.PRODUCT_ITEMS_TABLE, rows)
+        db_writer.delete_product_item(user=self.user, product_item_id=pi_id)
+        return {'productItemId': pi_id, 'deleted': True}

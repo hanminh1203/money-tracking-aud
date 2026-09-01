@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import Card from '../components/Card';
-import PageHeader from '../components/PageHeader';
+import PageHeader, { PageActions } from '../components/PageHeader';
 import { fetchHealth } from '../lib/api';
 
 const SERVICES = [
@@ -42,29 +42,29 @@ export default function Health() {
   const overallStatus = loading ? 'checking' : data?.status === 'ok' ? 'ok' : 'fail';
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="System Health"
-        description="Connection status for Google Sheet and PostgreSQL database."
-        action={
-          <button type="button" onClick={runCheck} disabled={loading} className="btn-primary">
-            <svg
-              className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M4.5 12a7.5 7.5 0 0113.5-4.5M19.5 12a7.5 7.5 0 01-13.5 4.5M4.5 4.5v4.5h4.5M19.5 19.5V15h-4.5"
-              />
-            </svg>
-            {loading ? 'Checking…' : 'Refresh'}
-          </button>
-        }
-      />
+    <PageHeader
+      title="System Health"
+      description="Connection status for Google Sheet and PostgreSQL database."
+    >
+      <div className="space-y-5">
+      <PageActions>
+        <button type="button" onClick={runCheck} disabled={loading} className="btn-primary">
+          <svg
+            className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M4.5 12a7.5 7.5 0 0113.5-4.5M19.5 12a7.5 7.5 0 01-13.5 4.5M4.5 4.5v4.5h4.5M19.5 19.5V15h-4.5"
+            />
+          </svg>
+          {loading ? 'Checking…' : 'Refresh'}
+        </button>
+      </PageActions>
 
       {error && (
         <div className="p-4 rounded-xl border border-expense/30 bg-expense/5 text-expense text-sm">
@@ -86,6 +86,7 @@ export default function Health() {
         ))}
       </div>
     </div>
+    </PageHeader>
   );
 }
 

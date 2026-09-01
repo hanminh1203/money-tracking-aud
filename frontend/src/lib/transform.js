@@ -52,6 +52,7 @@ export function normalizeRows(rows, categories = [], { sort = true } = {}) {
       const subCategory = String(r['Sub category'] || r['Sub Category'] || '').trim();
       const cat = bySub.get(subCategory);
       return {
+        id: String(r.id || '').trim() || null,
         row: r.__row,
         date: parseDate(r['Date']),
         creationDate: parseDate(r['Creation Date'] || r.creationDate),
@@ -62,6 +63,7 @@ export function normalizeRows(rows, categories = [], { sort = true } = {}) {
         mainCategory: String(cat?.mainCategory || r['Main Category'] || '').trim(),
         type: String(cat?.type || r['Type'] || '').trim(),
         receiptId: String(r['Receipt ID'] || r.receiptId || '').trim() || null,
+        giftcardId: String(r['Giftcard ID'] || r.giftcardId || '').trim() || null,
       };
     })
     .filter((r) => r.date && r.source);

@@ -133,6 +133,8 @@ $BackendDefaults = @{
   RECEIPT_TABLE             = 'Receipt'
   RECEIPT_ITEMS_TABLE       = 'Receipt_Items'
   GIFTCARD_TABLE            = 'Giftcard'
+  PRODUCT_TABLE             = 'Product'
+  PRODUCT_ITEMS_TABLE       = 'Product_Items'
   GROQ_MODEL                = 'llama-3.3-70b-versatile'
   GROQ_VISION_MODEL         = 'qwen/qwen3.6-27b'
 }

@@ -1,17 +1,23 @@
 import { useTheme } from '../hooks/useTheme';
 
-export default function ThemeToggle({ className = '' }) {
+export default function ThemeToggle({ className = '', labeled = false }) {
   const { isDark, toggleTheme } = useTheme();
+  const label = isDark ? 'Light mode' : 'Dark mode';
 
   return (
     <button
       type="button"
       onClick={toggleTheme}
       aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-      title={isDark ? 'Light mode' : 'Dark mode'}
-      className={`inline-flex items-center justify-center min-h-11 min-w-11 p-2 rounded-lg text-text-secondary hover:text-text-primary hover:bg-bg-raised transition-colors duration-200 cursor-pointer ${className}`}
+      title={label}
+      className={
+        labeled
+          ? `flex items-center gap-3 w-full min-h-11 px-3 rounded-lg text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-bg-raised/80 transition-colors duration-200 cursor-pointer ${className}`
+          : `inline-flex items-center justify-center min-h-11 min-w-11 p-2 rounded-lg text-text-secondary hover:text-text-primary hover:bg-bg-raised transition-colors duration-200 cursor-pointer ${className}`
+      }
     >
       {isDark ? <SunIcon /> : <MoonIcon />}
+      {labeled && <span>{label}</span>}
     </button>
   );
 }

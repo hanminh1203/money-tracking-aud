@@ -64,6 +64,8 @@ DATABASES = {
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'finance'),
         'HOST': os.environ.get('POSTGRES_HOST', '127.0.0.1'),
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+        # Named cursors break under transaction-mode poolers (PgBouncer / Supabase / Neon).
+        'DISABLE_SERVER_SIDE_CURSORS': True,
     }
 }
 
@@ -105,6 +107,8 @@ SOURCES_TABLE = os.environ.get('SOURCES_TABLE', 'Sources')
 RECEIPT_TABLE = os.environ.get('RECEIPT_TABLE', 'Receipt')
 RECEIPT_ITEMS_TABLE = os.environ.get('RECEIPT_ITEMS_TABLE', 'Receipt_Items')
 GIFTCARD_TABLE = os.environ.get('GIFTCARD_TABLE', 'Giftcard')
+PRODUCT_TABLE = os.environ.get('PRODUCT_TABLE', 'Product')
+PRODUCT_ITEMS_TABLE = os.environ.get('PRODUCT_ITEMS_TABLE', 'Product_Items')
 
 # Groq
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')

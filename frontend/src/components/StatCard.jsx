@@ -1,6 +1,6 @@
 import { formatAUD } from '../lib/transform';
 
-export default function StatCard({ label, value, tone = 'default', sublabel }) {
+export default function StatCard({ label, value, tone = 'default', sublabel, format = 'money' }) {
   const toneClass = {
     default: 'text-text-primary',
     income: 'text-income',
@@ -23,7 +23,7 @@ export default function StatCard({ label, value, tone = 'default', sublabel }) {
           {label}
         </div>
         <div className={`text-2xl sm:text-[1.65rem] font-semibold tabular-money leading-none ${toneClass}`}>
-          {formatAUD(value)}
+          {format === 'number' ? value : formatAUD(value)}
         </div>
         {sublabel && <div className="text-xs text-text-muted mt-2">{sublabel}</div>}
       </div>

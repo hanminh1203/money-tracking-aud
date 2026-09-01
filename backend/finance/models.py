@@ -116,6 +116,84 @@ class Giftcard(AuditedModel):
         ]
 
 
+class Product(AuditedModel):
+    """Mirrors Sheets Product; id equals sheet Product ID."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='products',
+        db_column='user_id',
+    )
+    name = models.CharField(max_length=256)
+
+    class Meta:
+        db_table = 'product'
+
+
+class ProductItem(AuditedModel):
+    """Mirrors Sheets Product_Items; links a product to a transaction or receipt item."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='product_items',
+        db_column='user_id',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='items',
+        db_column='product_id',
+    )
+    transaction = models.ForeignKey(
+        'Transaction',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='product_items',
+        db_column='transaction_id',
+    )
+    receipt_item = models.ForeignKey(
+        ReceiptItem,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='product_items',
+        db_column='receipt_item_id',
+    )
+    price = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+
+    class Meta:
+        db_table = 'product_item'
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(transaction__isnull=False, receipt_item__isnull=True)
+                    | models.Q(transaction__isnull=True, receipt_item__isnull=False)
+                ),
+                name='product_item_xor_link',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(transaction__isnull=True)
+                    | models.Q(price__isnull=False)
+                ),
+                name='product_item_price_required_for_tx',
+            ),
+            models.UniqueConstraint(
+                fields=['product', 'transaction'],
+                condition=models.Q(transaction__isnull=False),
+                name='product_item_product_tx_uniq',
+            ),
+            models.UniqueConstraint(
+                fields=['product', 'receipt_item'],
+                condition=models.Q(receipt_item__isnull=False),
+                name='product_item_product_receipt_item_uniq',
+            ),
+        ]
+
+
 class Transaction(AuditedModel):
     """Mirrors Sheets Transactions row."""
 

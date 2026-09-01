@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import Modal from './Modal';
+import { Link } from 'react-router-dom';
 import ReceiptView from './ReceiptView';
 import { formatAUD, formatDateShort } from '../lib/transform';
 
@@ -15,12 +15,25 @@ function amountClass(t) {
   return 'text-text-secondary';
 }
 
+function DetailsLink({ transaction }) {
+  if (!transaction?.id) return null;
+  return (
+    <Link
+      to={`/transactions/${transaction.id}`}
+      className={viewBtnClass}
+      aria-label="View transaction details"
+    >
+      Details
+    </Link>
+  );
+}
+
 function MobileTransactionCards({ transactions, onViewReceipt }) {
   return (
     <ul className="space-y-2 sm:hidden">
       {transactions.map((t, i) => (
         <li
-          key={i}
+          key={t.id || i}
           className="rounded-lg border border-bg-border/70 bg-bg-raised/20 px-3 py-3"
         >
           <div className="flex items-start justify-between gap-3">
@@ -40,15 +53,18 @@ function MobileTransactionCards({ transactions, onViewReceipt }) {
               <div className={`text-sm font-medium tabular-money ${amountClass(t)}`}>
                 {formatAUD(t.change)}
               </div>
-              {t.receiptId ? (
-                <button
-                  type="button"
-                  className={viewBtnClass}
-                  onClick={() => onViewReceipt(t.receiptId)}
-                >
-                  Receipt
-                </button>
-              ) : null}
+              <div className="flex flex-col items-end gap-1.5">
+                <DetailsLink transaction={t} />
+                {t.receiptId ? (
+                  <button
+                    type="button"
+                    className={viewBtnClass}
+                    onClick={() => onViewReceipt(t.receiptId)}
+                  >
+                    Receipt
+                  </button>
+                ) : null}
+              </div>
             </div>
           </div>
         </li>
@@ -83,7 +99,10 @@ export default function TransactionList({
   return (
     <>
       <div className={loading ? 'opacity-60' : undefined}>
-        <MobileTransactionCards transactions={transactions} onViewReceipt={setViewReceiptId} />
+        <MobileTransactionCards
+          transactions={transactions}
+          onViewReceipt={setViewReceiptId}
+        />
 
         <div className="hidden sm:block overflow-x-auto scrollbar-thin">
           <table className="w-full text-sm">
@@ -103,12 +122,15 @@ export default function TransactionList({
                 <th className="py-2 pl-4 text-xs font-semibold uppercase tracking-[0.05em] text-right">
                   Receipt
                 </th>
+                <th className="py-2 pl-4 text-xs font-semibold uppercase tracking-[0.05em] text-right">
+                  Details
+                </th>
               </tr>
             </thead>
             <tbody>
               {transactions.map((t, i) => (
                 <tr
-                  key={i}
+                  key={t.id || i}
                   className="border-b border-bg-border/70 hover:bg-bg-raised/50 transition-colors duration-150"
                 >
                   <td className="py-2.5 pr-4 text-text-secondary whitespace-nowrap tabular-nums">
@@ -136,6 +158,9 @@ export default function TransactionList({
                         View
                       </button>
                     ) : null}
+                  </td>
+                  <td className="py-2.5 pl-4 text-right whitespace-nowrap">
+                    <DetailsLink transaction={t} />
                   </td>
                 </tr>
               ))}
@@ -174,9 +199,7 @@ export default function TransactionList({
       )}
 
       {viewReceiptId && (
-        <Modal title="Receipt" onClose={() => setViewReceiptId(null)} maxWidth="max-w-2xl">
-          <ReceiptView receiptId={viewReceiptId} onClose={() => setViewReceiptId(null)} />
-        </Modal>
+        <ReceiptView receiptId={viewReceiptId} onClose={() => setViewReceiptId(null)} />
       )}
     </>
   );

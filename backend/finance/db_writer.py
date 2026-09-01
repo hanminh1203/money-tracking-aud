@@ -10,11 +10,65 @@ from typing import Any
 
 from django.db import transaction as db_transaction
 
-from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction, User
+from finance.models import (
+    Category,
+    Giftcard,
+    Product,
+    ProductItem,
+    Receipt,
+    ReceiptItem,
+    Source,
+    Transaction,
+    User,
+)
 
 logger = logging.getLogger(__name__)
 
 GIFTCARD_SOURCE_NAME = 'Giftcard'
+RECEIPT_ITEM_NAMESPACE = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
+
+
+def receipt_item_id_for_row(
+    *,
+    item_id: Any = None,
+    receipt_id: Any,
+    name: str,
+    amount: Any,
+    unit: str,
+    money: Any,
+) -> uuid.UUID:
+    """Resolve receipt item id from sheet value or deterministic fallback."""
+    text = str(item_id or '').strip()
+    if text:
+        return uuid.UUID(text)
+    key = f'{receipt_id}:{name}:{amount}:{unit}:{money}'
+    return uuid.uuid5(RECEIPT_ITEM_NAMESPACE, key)
+
+
+def _receipt_item_kwargs(
+    *,
+    owner: User,
+    receipt_id: uuid.UUID,
+    it: dict,
+) -> dict:
+    item_id = receipt_item_id_for_row(
+        item_id=it.get('id'),
+        receipt_id=receipt_id,
+        name=str(it['name']),
+        amount=it['amount'],
+        unit=str(it['unit']),
+        money=it['money'],
+    )
+    return {
+        'id': item_id,
+        'version': 1,
+        'user': owner,
+        'receipt_id': receipt_id,
+        'name': str(it['name']),
+        'amount': _dec(it['amount']),
+        'unit': str(it['unit']),
+        'money': _dec(it['money']),
+    }
 
 
 def _parse_date(value: Any) -> date:
@@ -166,16 +220,7 @@ def save_receipt_bundle(
             )
             ReceiptItem.objects.bulk_create(
                 [
-                    ReceiptItem(
-                        id=uuid.uuid4(),
-                        version=1,
-                        user=owner,
-                        receipt_id=rid,
-                        name=str(it['name']),
-                        amount=_dec(it['amount']),
-                        unit=str(it['unit']),
-                        money=_dec(it['money']),
-                    )
+                    ReceiptItem(**_receipt_item_kwargs(owner=owner, receipt_id=rid, it=it))
                     for it in items
                 ]
             )
@@ -280,3 +325,148 @@ def save_giftcard_use(
             )
     except Exception:
         logger.exception('Postgres dual-write failed for giftcard use %s', giftcard_id)
+
+
+def update_transaction_detail(
+    *,
+    user: User,
+    transaction: Transaction,
+    date: Any,
+    change: Any,
+    source: str,
+    comment: str,
+    sub_category: str,
+    receipt_total: Any | None = None,
+    items: list[dict] | None = None,
+    sibling_updates: list[Transaction] | None = None,
+) -> None:
+    """Update a transaction (and linked receipt items) after Sheets writes succeed."""
+    owner = _require_user(user)
+    try:
+        with db_transaction.atomic():
+            transaction.date = _parse_date(date)
+            transaction.change = _dec(change)
+            transaction.source_id = _resolve_source_id(source)
+            transaction.comment = str(comment or '')
+            transaction.category_id = _resolve_category_id(sub_category or '')
+            transaction.version = (transaction.version or 1) + 1
+            transaction.save(
+                update_fields=[
+                    'date',
+                    'change',
+                    'source_id',
+                    'comment',
+                    'category_id',
+                    'version',
+                ]
+            )
+
+            for sibling in sibling_updates or []:
+                sibling.date = transaction.date
+                sibling.comment = transaction.comment
+                sibling.category_id = transaction.category_id
+                sibling.version = (sibling.version or 1) + 1
+                sibling.save(update_fields=['date', 'comment', 'category_id', 'version'])
+
+            if transaction.receipt_id:
+                receipt = Receipt.objects.select_for_update().get(
+                    pk=transaction.receipt_id, user=owner
+                )
+                receipt.date = transaction.date
+                if receipt_total is not None:
+                    receipt.total = _dec(receipt_total)
+                receipt.version = (receipt.version or 1) + 1
+                receipt.save(update_fields=['date', 'total', 'version'])
+
+                if items is not None:
+                    ReceiptItem.objects.filter(receipt=receipt, user=owner).delete()
+                    ReceiptItem.objects.bulk_create(
+                        [
+                            ReceiptItem(
+                                **_receipt_item_kwargs(
+                                    owner=owner,
+                                    receipt_id=receipt.id,
+                                    it=it,
+                                )
+                            )
+                            for it in items
+                        ]
+                    )
+    except Exception:
+        logger.exception(
+            'Postgres dual-write failed for transaction update %s', transaction.id
+        )
+        raise
+
+
+def save_product(*, user: User, product_id: Any, name: str) -> None:
+    owner = _require_user(user)
+    try:
+        Product.objects.create(
+            id=uuid.UUID(str(product_id)),
+            version=1,
+            user=owner,
+            name=str(name).strip(),
+        )
+    except Exception:
+        logger.exception('Postgres dual-write failed for product %s', product_id)
+
+
+def update_product(*, user: User, product_id: Any, name: str) -> None:
+    owner = _require_user(user)
+    try:
+        product = Product.objects.get(pk=product_id, user=owner)
+        product.name = str(name).strip()
+        product.version = (product.version or 1) + 1
+        product.save(update_fields=['name', 'version'])
+    except Product.DoesNotExist as exc:
+        raise ValueError(f'Product {product_id} not found') from exc
+    except Exception:
+        logger.exception('Postgres dual-write failed for product update %s', product_id)
+        raise
+
+
+def delete_product(*, user: User, product_id: Any) -> None:
+    owner = _require_user(user)
+    try:
+        Product.objects.filter(pk=product_id, user=owner).delete()
+    except Exception:
+        logger.exception('Postgres dual-write failed for product delete %s', product_id)
+
+
+def save_product_item(
+    *,
+    user: User,
+    product_item_id: Any,
+    product_id: Any,
+    price: Any | None = None,
+    transaction_id: Any | None = None,
+    receipt_item_id: Any | None = None,
+) -> None:
+    owner = _require_user(user)
+    try:
+        tx_id = uuid.UUID(str(transaction_id)) if transaction_id else None
+        ri_id = uuid.UUID(str(receipt_item_id)) if receipt_item_id else None
+        if bool(tx_id) == bool(ri_id):
+            raise ValueError('Product item must link to transaction or receipt item')
+        ProductItem.objects.create(
+            id=uuid.UUID(str(product_item_id)),
+            version=1,
+            user=owner,
+            product_id=uuid.UUID(str(product_id)),
+            transaction_id=tx_id,
+            receipt_item_id=ri_id,
+            price=_dec(price) if price is not None else None,
+        )
+    except Exception:
+        logger.exception('Postgres dual-write failed for product item %s', product_item_id)
+        raise
+
+
+def delete_product_item(*, user: User, product_item_id: Any) -> None:
+    owner = _require_user(user)
+    try:
+        ProductItem.objects.filter(pk=product_item_id, user=owner).delete()
+    except Exception:
+        logger.exception('Postgres dual-write failed for product item delete %s', product_item_id)
+

@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
 
-export default function Modal({ title, onClose, children, maxWidth = 'max-w-lg' }) {
+export default function Modal({ title, onClose, children, maxWidth = 'max-w-lg', open = true }) {
   useEffect(() => {
+    if (!open) return;
     function onKeyDown(e) {
       if (e.key === 'Escape') onClose?.();
     }
@@ -12,7 +13,9 @@ export default function Modal({ title, onClose, children, maxWidth = 'max-w-lg' 
       document.removeEventListener('keydown', onKeyDown);
       document.body.style.overflow = prev;
     };
-  }, [onClose]);
+  }, [onClose, open]);
+
+  if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fade-in">

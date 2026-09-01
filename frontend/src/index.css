@@ -149,6 +149,23 @@
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
   }
+
+  /* Bootstrap-style in-flow collapse for the mobile nav dropdown */
+  .nav-collapse {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 220ms ease;
+  }
+  .nav-collapse[data-open='true'] {
+    grid-template-rows: 1fr;
+  }
+  .nav-collapse:not([data-open='true']) {
+    pointer-events: none;
+  }
+  .nav-collapse > * {
+    overflow: hidden;
+    min-height: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import Card from '../components/Card';
 import Modal from '../components/Modal';
-import PageHeader from '../components/PageHeader';
+import PageHeader, { PageActions } from '../components/PageHeader';
 import BuyGiftcardForm from '../components/BuyGiftcardForm';
 import UseGiftcardForm from '../components/UseGiftcardForm';
 import { getGiftcards } from '../lib/api';
@@ -47,16 +47,16 @@ export default function Giftcards({ metadata, balances, onSaved, listVersion }) 
   }
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Giftcards"
-        description="Track store credit balances and record redemptions."
-        action={
-          <button type="button" onClick={() => setModal('buy')} className="btn-primary">
-            Buy giftcard
-          </button>
-        }
-      />
+    <PageHeader
+      title="Giftcards"
+      description="Track store credit balances and record redemptions."
+    >
+      <div className="space-y-5">
+      <PageActions>
+        <button type="button" onClick={() => setModal('buy')} className="btn-primary">
+          Buy giftcard
+        </button>
+      </PageActions>
 
       <Card title="Giftcards">
         {error && <div className="mb-3 text-sm text-expense">{error}</div>}
@@ -164,5 +164,6 @@ export default function Giftcards({ metadata, balances, onSaved, listVersion }) 
         </Modal>
       )}
     </div>
+    </PageHeader>
   );
 }

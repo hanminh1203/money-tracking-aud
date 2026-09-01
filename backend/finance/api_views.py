@@ -26,8 +26,12 @@ from .db_reader import (
     get_export_payload,
     get_giftcards as db_get_giftcards,
     get_metadata as db_get_metadata,
+    get_product_detail as db_get_product_detail,
+    get_products as db_get_products,
     get_receipt as db_get_receipt,
+    get_transaction as db_get_transaction,
     get_transaction_data,
+    search_link_candidates,
 )
 from .db_sync import SyncError, compare_mirror, sync_from_sheets
 from .groq_client import GroqError, extract_receipt_from_image, parse_finance_message
@@ -208,6 +212,36 @@ def transactions(request: HttpRequest) -> JsonResponse:
     return JsonResponse(result)
 
 
+@require_http_methods(['GET', 'PUT'])
+@require_auth
+def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
+    user: User = request.finance_user  # type: ignore[attr-defined]
+    if request.method == 'GET':
+        try:
+            data = db_get_transaction(user=user, transaction_id=transaction_id)
+        except ReaderError as exc:
+            return json_error(str(exc), status=exc.status)
+        return JsonResponse(data)
+
+    try:
+        body = parse_json(request)
+        result = sheets_for(request).update_transaction(
+            transaction_id,
+            date=body.get('date'),
+            amount=body.get('amount'),
+            type=body.get('type'),
+            source=body.get('source'),
+            sub_category=body.get('subCategory') or '',
+            comment=body.get('comment') or '',
+            items=body.get('items'),
+        )
+    except ValueError as exc:
+        return json_error(str(exc))
+    except SheetsError as exc:
+        return json_error(str(exc), status=exc.status or 400)
+    return JsonResponse(result)
+
+
 @require_GET
 @require_auth
 def metadata(request: HttpRequest) -> JsonResponse:
@@ -309,6 +343,100 @@ def use_giftcard(request: HttpRequest, giftcard_id: str) -> JsonResponse:
         )
     except ValueError as exc:
         return json_error(str(exc))
+    except SheetsError as exc:
+        return json_error(str(exc), status=exc.status or 400)
+    return JsonResponse(result)
+
+
+@require_http_methods(['GET', 'POST'])
+@require_auth
+def products(request: HttpRequest) -> JsonResponse:
+    user: User = request.finance_user  # type: ignore[attr-defined]
+    if request.method == 'GET':
+        return JsonResponse(db_get_products(user=user), safe=False)
+    try:
+        body = parse_json(request)
+        result = sheets_for(request).add_product(name=body.get('name'))
+    except ValueError as exc:
+        return json_error(str(exc))
+    except SheetsError as exc:
+        return json_error(str(exc), status=exc.status or 400)
+    return JsonResponse(result)
+
+
+@require_http_methods(['GET', 'PUT', 'DELETE'])
+@require_auth
+def product_detail(request: HttpRequest, product_id: str) -> JsonResponse:
+    user: User = request.finance_user  # type: ignore[attr-defined]
+    if request.method == 'GET':
+        try:
+            data = db_get_product_detail(user=user, product_id=product_id)
+        except ReaderError as exc:
+            return json_error(str(exc), status=exc.status)
+        return JsonResponse(data)
+
+    client = sheets_for(request)
+    if request.method == 'PUT':
+        try:
+            body = parse_json(request)
+            result = client.update_product(product_id=product_id, name=body.get('name'))
+        except ValueError as exc:
+            return json_error(str(exc))
+        except SheetsError as exc:
+            return json_error(str(exc), status=exc.status or 400)
+        return JsonResponse(result)
+
+    try:
+        result = client.delete_product(product_id=product_id)
+    except SheetsError as exc:
+        return json_error(str(exc), status=exc.status or 400)
+    return JsonResponse(result)
+
+
+@require_GET
+@require_auth
+def product_candidates(request: HttpRequest, product_id: str) -> JsonResponse:
+    user: User = request.finance_user  # type: ignore[attr-defined]
+    link_type = request.GET.get('type') or 'transaction'
+    q = request.GET.get('q') or ''
+    page_raw = request.GET.get('page')
+    page = int(page_raw) if page_raw else 1
+    try:
+        data = search_link_candidates(
+            user=user,
+            product_id=product_id,
+            link_type=link_type,
+            q=q,
+            page=page,
+        )
+    except ReaderError as exc:
+        return json_error(str(exc), status=exc.status)
+    return JsonResponse(data)
+
+
+@require_http_methods(['POST'])
+@require_auth
+def create_product_item(request: HttpRequest) -> JsonResponse:
+    try:
+        body = parse_json(request)
+        result = sheets_for(request).add_product_item(
+            product_id=body.get('productId'),
+            transaction_id=body.get('transactionId'),
+            receipt_item_id=body.get('receiptItemId'),
+            price=body.get('price'),
+        )
+    except ValueError as exc:
+        return json_error(str(exc))
+    except SheetsError as exc:
+        return json_error(str(exc), status=exc.status or 400)
+    return JsonResponse(result)
+
+
+@require_http_methods(['DELETE'])
+@require_auth
+def delete_product_item(request: HttpRequest, product_item_id: str) -> JsonResponse:
+    try:
+        result = sheets_for(request).delete_product_item(product_item_id=product_item_id)
     except SheetsError as exc:
         return json_error(str(exc), status=exc.status or 400)
     return JsonResponse(result)
