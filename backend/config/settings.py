@@ -107,6 +107,8 @@ SOURCES_TABLE = os.environ.get('SOURCES_TABLE', 'Sources')
 RECEIPT_TABLE = os.environ.get('RECEIPT_TABLE', 'Receipt')
 RECEIPT_ITEMS_TABLE = os.environ.get('RECEIPT_ITEMS_TABLE', 'Receipt_Items')
 GIFTCARD_TABLE = os.environ.get('GIFTCARD_TABLE', 'Giftcard')
+PRODUCT_TABLE = os.environ.get('PRODUCT_TABLE', 'Product')
+PRODUCT_ITEMS_TABLE = os.environ.get('PRODUCT_ITEMS_TABLE', 'Product_Items')
 
 # Groq
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')

@@ -107,6 +107,42 @@ export function useGiftcard(id, payload) {
   return api(`/giftcards/${encodeURIComponent(id)}/use`, { method: 'POST', body: payload });
 }
 
+export function getProducts() {
+  return api('/products');
+}
+
+export function createProduct(payload) {
+  return api('/products', { method: 'POST', body: payload });
+}
+
+export function getProduct(id) {
+  return api(`/products/${encodeURIComponent(id)}`);
+}
+
+export function updateProduct(id, payload) {
+  return api(`/products/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+}
+
+export function deleteProduct(id) {
+  return api(`/products/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function createProductItem(payload) {
+  return api('/product-items', { method: 'POST', body: payload });
+}
+
+export function deleteProductItem(id) {
+  return api(`/product-items/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function getProductCandidates(productId, { type = 'transaction', q = '', page = 1 } = {}) {
+  const params = new URLSearchParams();
+  params.set('type', type);
+  if (q) params.set('q', q);
+  if (page != null) params.set('page', String(page));
+  return api(`/products/${encodeURIComponent(productId)}/candidates?${params}`);
+}
+
 export function parseFinanceMessage({ message, metadata }) {
   return api('/assistant/parse', { method: 'POST', body: { message, metadata } });
 }

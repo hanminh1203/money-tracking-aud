@@ -7,12 +7,22 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db.models import Case, DecimalField, QuerySet, Sum, Value, When
+from django.db.models import Case, DecimalField, Q, QuerySet, Sum, Value, When
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
 from finance.comment_parse import parse_store_comment
-from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction, User
+from finance.models import (
+    Category,
+    Giftcard,
+    Product,
+    ProductItem,
+    Receipt,
+    ReceiptItem,
+    Source,
+    Transaction,
+    User,
+)
 
 TRANSACTION_HEADERS = [
     'Date',
@@ -27,8 +37,23 @@ TRANSACTION_HEADERS = [
 CATEGORY_EXPORT_COLUMNS = ['Main Category', 'Sub category', 'Type']
 SOURCES_EXPORT_COLUMNS = ['Name', 'Type']
 RECEIPT_EXPORT_COLUMNS = ['Receipt ID', 'Date', 'Total']
-RECEIPT_ITEM_EXPORT_COLUMNS = ['Receipt ID', 'Name', 'Amount', 'Unit', 'Money']
+RECEIPT_ITEM_EXPORT_COLUMNS = [
+    'Receipt Item ID',
+    'Receipt ID',
+    'Name',
+    'Amount',
+    'Unit',
+    'Money',
+]
 GIFTCARD_EXPORT_COLUMNS = ['Giftcard ID', 'Shop', 'Date', 'Balance']
+PRODUCT_EXPORT_COLUMNS = ['Product ID', 'Name']
+PRODUCT_ITEM_EXPORT_COLUMNS = [
+    'Product Item ID',
+    'Product ID',
+    'Price',
+    'Transaction Row',
+    'Receipt Item ID',
+]
 
 DEFAULT_PAGE_SIZE = 10
 
@@ -81,7 +106,20 @@ def _dashboard_tx_row(tx: Transaction) -> dict:
     }
 
 
-def _receipt_items(receipt: Receipt) -> list[dict]:
+def _receipt_items(receipt: Receipt, *, user: User | None = None) -> list[dict]:
+    product_by_receipt_item: dict[str, dict] = {}
+    if user is not None:
+        for pi in (
+            ProductItem.objects.filter(user=user, receipt_item__receipt=receipt)
+            .select_related('product', 'receipt_item')
+            .iterator()
+        ):
+            product_by_receipt_item[str(pi.receipt_item_id)] = {
+                'productItemId': str(pi.id),
+                'productId': str(pi.product_id),
+                'productName': pi.product.name,
+            }
+
     items = sorted(
         receipt.items.all(),
         key=lambda it: (
@@ -96,6 +134,7 @@ def _receipt_items(receipt: Receipt) -> list[dict]:
             'amount': _dec_to_number(it.amount),
             'unit': it.unit,
             'money': _dec_to_number(it.money),
+            **product_by_receipt_item.get(str(it.id), {}),
         }
         for it in items
     ]
@@ -277,7 +316,7 @@ def get_receipt(*, user: User, receipt_id: str) -> dict:
     except (Receipt.DoesNotExist, ValueError) as exc:
         raise ReaderError('Receipt not found', status=404) from exc
 
-    items = _receipt_items(receipt)
+    items = _receipt_items(receipt, user=user)
 
     sources = []
     store = ''
@@ -337,10 +376,22 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
                 }
                 for linked in tx.receipt.transactions.all()
             ],
-            'items': _receipt_items(tx.receipt),
+            'items': _receipt_items(tx.receipt, user=user),
         }
     else:
         data['receipt'] = None
+
+    data['products'] = [
+        {
+            'id': str(pi.id),
+            'productId': str(pi.product_id),
+            'name': pi.product.name,
+            'price': _dec_to_number(pi.price) if pi.price is not None else None,
+        }
+        for pi in ProductItem.objects.filter(user=user, transaction_id=tx.id)
+        .select_related('product')
+        .order_by('creation_date')
+    ]
     return data
 
 
@@ -355,6 +406,237 @@ def get_giftcards(*, user: User) -> list[dict]:
         }
         for g in Giftcard.objects.filter(user=user, balance__gt=0).order_by('-date', 'shop')
     ]
+
+
+def _resolved_product_item_price(pi: ProductItem) -> Decimal:
+    if pi.price is not None:
+        return pi.price
+    if pi.receipt_item_id and pi.receipt_item:
+        return pi.receipt_item.money
+    if pi.transaction_id and pi.transaction:
+        return abs(pi.transaction.change)
+    return Decimal('0')
+
+
+def _product_item_purchase_date(pi: ProductItem) -> date | None:
+    if pi.transaction_id and pi.transaction:
+        return pi.transaction.date
+    if pi.receipt_item_id and pi.receipt_item:
+        return pi.receipt_item.receipt.date
+    return None
+
+
+def _product_item_label(pi: ProductItem) -> str:
+    if pi.transaction_id and pi.transaction:
+        store, comment = parse_store_comment(pi.transaction.comment or '')
+        parts = [p for p in (store, pi.transaction.source.name if pi.transaction.source_id else '', comment) if p]
+        return ' · '.join(parts) if parts else 'Transaction'
+    if pi.receipt_item_id and pi.receipt_item:
+        return pi.receipt_item.name
+    return ''
+
+
+def _product_item_row(pi: ProductItem) -> dict:
+    purchase_date = _product_item_purchase_date(pi)
+    row = {
+        'id': str(pi.id),
+        'date': purchase_date.isoformat() if purchase_date else None,
+        'price': _dec_to_number(_resolved_product_item_price(pi)),
+        'label': _product_item_label(pi),
+    }
+    if pi.transaction_id:
+        row['linkType'] = 'transaction'
+        row['transactionId'] = str(pi.transaction_id)
+    else:
+        row['linkType'] = 'receipt_item'
+        row['receiptItemId'] = str(pi.receipt_item_id)
+        row['receiptId'] = str(pi.receipt_item.receipt_id) if pi.receipt_item_id else None
+    return row
+
+
+def _product_stats(items: list[ProductItem]) -> dict:
+    dated = []
+    for pi in items:
+        d = _product_item_purchase_date(pi)
+        if d is not None:
+            dated.append((d, _resolved_product_item_price(pi)))
+    dated.sort(key=lambda x: x[0])
+
+    total_purchases = len(dated)
+    total_spent = sum((price for _, price in dated), Decimal('0'))
+    last_purchase_date = dated[-1][0].isoformat() if dated else None
+
+    cost_per_day = None
+    avg_days_between = None
+    if dated:
+        last_date, last_price = dated[-1]
+        days_owned = max((timezone.localdate() - last_date).days, 1)
+        cost_per_day = _dec_to_number(last_price / Decimal(days_owned))
+    if len(dated) >= 2:
+        gaps = [(dated[i][0] - dated[i - 1][0]).days for i in range(1, len(dated))]
+        avg_days_between = round(sum(gaps) / len(gaps), 1)
+
+    return {
+        'costPerDay': cost_per_day,
+        'avgDaysBetweenPurchases': avg_days_between,
+        'totalPurchases': total_purchases,
+        'lastPurchaseDate': last_purchase_date,
+        'totalSpent': _dec_to_number(total_spent),
+    }
+
+
+def get_products(*, user: User) -> list[dict]:
+    products = Product.objects.filter(user=user).order_by('name', 'id')
+    rows = []
+    for product in products:
+        items = list(
+            ProductItem.objects.filter(user=user, product=product)
+            .select_related('transaction', 'receipt_item__receipt')
+        )
+        stats = _product_stats(items)
+        rows.append(
+            {
+                'id': str(product.id),
+                'name': product.name,
+                'purchaseCount': stats['totalPurchases'],
+                'lastPurchaseDate': stats['lastPurchaseDate'],
+                'costPerDay': stats['costPerDay'],
+            }
+        )
+    return rows
+
+
+def get_product_detail(*, user: User, product_id: str) -> dict:
+    pid = str(product_id or '').strip()
+    if not pid:
+        raise ReaderError('Product ID is required', status=400)
+    try:
+        product = Product.objects.get(pk=pid, user=user)
+    except (Product.DoesNotExist, ValueError) as exc:
+        raise ReaderError('Product not found', status=404) from exc
+
+    items = list(
+        ProductItem.objects.filter(user=user, product=product)
+        .select_related(
+            'transaction__source',
+            'receipt_item__receipt',
+        )
+        .order_by('-transaction__date', '-receipt_item__receipt__date', '-creation_date')
+    )
+    items.sort(
+        key=lambda pi: _product_item_purchase_date(pi) or date.min,
+        reverse=True,
+    )
+    stats = _product_stats(items)
+    return {
+        'id': str(product.id),
+        'name': product.name,
+        'stats': stats,
+        'purchases': [_product_item_row(pi) for pi in items],
+    }
+
+
+def search_link_candidates(
+    *,
+    user: User,
+    product_id: str,
+    link_type: str,
+    q: str = '',
+    page: int = 1,
+) -> dict:
+    pid = str(product_id or '').strip()
+    if not pid:
+        raise ReaderError('Product ID is required', status=400)
+    if not Product.objects.filter(pk=pid, user=user).exists():
+        raise ReaderError('Product not found', status=404)
+
+    page = max(1, int(page))
+    size = DEFAULT_PAGE_SIZE
+    query = (q or '').strip().lower()
+
+    if link_type == 'transaction':
+        linked_ids = set(
+            ProductItem.objects.filter(user=user, product_id=pid, transaction_id__isnull=False)
+            .values_list('transaction_id', flat=True)
+        )
+        qs = (
+            Transaction.objects.filter(user=user)
+            .exclude(id__in=linked_ids)
+            .select_related('source', 'category')
+            .order_by('-date', '-creation_date')
+        )
+        if query:
+            qs = qs.filter(
+                Q(comment__icontains=query)
+                | Q(source__name__icontains=query)
+                | Q(category__sub_category__icontains=query)
+            )
+        total = qs.count()
+        total_pages = max(1, (total + size - 1) // size) if total else 1
+        if page > total_pages:
+            page = total_pages
+        offset = (page - 1) * size
+        rows = []
+        for tx in qs[offset : offset + size]:
+            store, comment = parse_store_comment(tx.comment or '')
+            label = ' · '.join(
+                p for p in (store, tx.source.name if tx.source_id else '', comment) if p
+            )
+            rows.append(
+                {
+                    'id': str(tx.id),
+                    'date': tx.date.isoformat(),
+                    'amount': abs(_dec_to_number(tx.change)),
+                    'label': label or 'Transaction',
+                }
+            )
+        return {
+            'type': 'transaction',
+            'rows': rows,
+            'page': page,
+            'pageSize': size,
+            'total': total,
+            'totalPages': total_pages,
+        }
+
+    if link_type == 'receipt_item':
+        linked_ids = set(
+            ProductItem.objects.filter(user=user, product_id=pid, receipt_item_id__isnull=False)
+            .values_list('receipt_item_id', flat=True)
+        )
+        qs = (
+            ReceiptItem.objects.filter(user=user)
+            .exclude(id__in=linked_ids)
+            .select_related('receipt')
+            .order_by('-receipt__date', 'name')
+        )
+        if query:
+            qs = qs.filter(name__icontains=query)
+        total = qs.count()
+        total_pages = max(1, (total + size - 1) // size) if total else 1
+        if page > total_pages:
+            page = total_pages
+        offset = (page - 1) * size
+        rows = [
+            {
+                'id': str(it.id),
+                'receiptId': str(it.receipt_id),
+                'date': it.receipt.date.isoformat(),
+                'amount': _dec_to_number(it.money),
+                'label': it.name,
+            }
+            for it in qs[offset : offset + size]
+        ]
+        return {
+            'type': 'receipt_item',
+            'rows': rows,
+            'page': page,
+            'pageSize': size,
+            'total': total,
+            'totalPages': total_pages,
+        }
+
+    raise ReaderError('type must be transaction or receipt_item', status=400)
 
 
 def get_export_payload(*, user: User) -> dict[str, dict]:
@@ -396,6 +678,7 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
 
     receipt_items = [
         [
+            str(it.id),
             str(it.receipt_id),
             it.name or '',
             _dec_cell(it.amount),
@@ -404,6 +687,25 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
         ]
         for it in ReceiptItem.objects.filter(user=user)
         .order_by('receipt_id', 'id')
+        .iterator()
+    ]
+
+    products = [
+        [str(p.id), p.name or '']
+        for p in Product.objects.filter(user=user).order_by('name', 'id').iterator()
+    ]
+
+    product_items = [
+        [
+            str(pi.id),
+            str(pi.product_id),
+            _dec_cell(pi.price) if pi.price is not None else '',
+            str(pi.transaction.row_number) if pi.transaction_id else '',
+            str(pi.receipt_item_id) if pi.receipt_item_id else '',
+        ]
+        for pi in ProductItem.objects.filter(user=user)
+        .select_related('transaction')
+        .order_by('product_id', 'creation_date')
         .iterator()
     ]
 
@@ -447,5 +749,15 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
             'table_name': settings.SOURCES_TABLE,
             'columns': list(SOURCES_EXPORT_COLUMNS),
             'rows': sources,
+        },
+        'products': {
+            'table_name': settings.PRODUCT_TABLE,
+            'columns': list(PRODUCT_EXPORT_COLUMNS),
+            'rows': products,
+        },
+        'product_items': {
+            'table_name': settings.PRODUCT_ITEMS_TABLE,
+            'columns': list(PRODUCT_ITEM_EXPORT_COLUMNS),
+            'rows': product_items,
         },
     }

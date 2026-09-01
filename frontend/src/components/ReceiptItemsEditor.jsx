@@ -5,23 +5,29 @@ const DEFAULT_UNITS = ['kg', 'g', 'ml', 'l', 'piece'];
 
 export const emptyReceiptItem = () => ({
   key: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  id: '',
   name: '',
   amount: '',
   unit: 'piece',
   money: '',
+  productId: '',
+  productItemId: '',
 });
 
 export function toReceiptItemForm(item) {
   return {
     key: item.id || emptyReceiptItem().key,
+    id: item.id || '',
     name: item.name || '',
     amount: item.amount == null || item.amount === '' ? '' : String(item.amount),
     unit: item.unit || 'piece',
     money: item.money == null || item.money === '' ? '' : String(item.money),
+    productId: item.productId || '',
+    productItemId: item.productItemId || '',
   };
 }
 
-export default function ReceiptItemsEditor({ items, onChange, total }) {
+export default function ReceiptItemsEditor({ items, onChange, total, products = [] }) {
   const units = [...DEFAULT_UNITS];
   for (const it of items) {
     if (it.unit && !units.includes(it.unit)) units.push(it.unit);
@@ -98,6 +104,24 @@ export default function ReceiptItemsEditor({ items, onChange, total }) {
                 required
               />
             </Field>
+            {it.id && products.length > 0 && (
+              <Field label="Product" className="col-span-2 sm:col-span-1">
+                <select
+                  value={it.productId || ''}
+                  onChange={(e) =>
+                    updateItem(i, { productId: e.target.value, productItemId: '' })
+                  }
+                  className={selectClass}
+                >
+                  <option value="">None</option>
+                  {products.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <button
               type="button"
               disabled={items.length === 1}

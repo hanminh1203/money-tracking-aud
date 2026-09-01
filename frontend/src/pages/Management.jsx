@@ -15,10 +15,12 @@ const TABLES = [
   { key: 'receipt', label: 'Receipt' },
   { key: 'receipt_items', label: 'Receipt Items' },
   { key: 'giftcards', label: 'Giftcards' },
+  { key: 'products', label: 'Products' },
+  { key: 'product_items', label: 'Product Items' },
 ];
 
 const SYNC_CONFIRM =
-  'This will delete your Transactions, Giftcards, Receipts, and Receipt Items in Postgres and reload them from your Google Sheet. Continue?';
+  'This will delete your Transactions, Giftcards, Receipts, Receipt Items, Products, and Product Items in Postgres and reload them from your Google Sheet. Continue?';
 
 function confirmSync() {
   return window.confirm(SYNC_CONFIRM);
@@ -89,7 +91,7 @@ export default function Management() {
       const result = await syncManagement();
       const inserted = result?.inserted || {};
       setSyncMessage(
-        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards.`
+        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards, ${inserted.products ?? 0} products, ${inserted.product_items ?? 0} product items.`
       );
       await loadStatus({ force: true });
     } catch (err) {
@@ -195,6 +197,17 @@ export default function Management() {
             Spreadsheet ID from the sheet URL (<code className="text-xs">/d/&lt;id&gt;/edit</code>).
             Sync and status use this sheet for your account only.
           </p>
+          <p className="text-sm text-text-muted">
+            For product tracking, add named tables{' '}
+            <code className="text-xs">Product</code> (
+            <code className="text-xs">Product ID</code>, <code className="text-xs">Name</code>) and{' '}
+            <code className="text-xs">Product_Items</code> (
+            <code className="text-xs">Product Item ID</code>, <code className="text-xs">Product ID</code>,{' '}
+            <code className="text-xs">Price</code>, <code className="text-xs">Transaction Row</code>,{' '}
+            <code className="text-xs">Receipt Item ID</code>). Add a{' '}
+            <code className="text-xs">Receipt Item ID</code> column as the first column in{' '}
+            <code className="text-xs">Receipt_Items</code>.
+          </p>
           <div className="flex flex-col sm:flex-row gap-2">
             <input
               type="text"
@@ -240,6 +253,8 @@ export default function Management() {
             {exportResult.counts?.receipt ?? 0} receipts,{' '}
             {exportResult.counts?.receipt_items ?? 0} receipt items,{' '}
             {exportResult.counts?.giftcards ?? 0} giftcards,{' '}
+            {exportResult.counts?.products ?? 0} products,{' '}
+            {exportResult.counts?.product_items ?? 0} product items,{' '}
             {exportResult.counts?.category ?? 0} categories,{' '}
             {exportResult.counts?.sources ?? 0} sources.
           </p>

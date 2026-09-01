@@ -4,9 +4,19 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 
-from finance.db_reader import ReaderError, get_dashboard_data, get_transaction
+from finance.db_reader import ReaderError, get_dashboard_data, get_product_detail, get_products, get_transaction
 from finance.db_sync import sync_from_sheets
-from finance.models import Category, Giftcard, Receipt, ReceiptItem, Source, Transaction, User
+from finance.models import (
+    Category,
+    Giftcard,
+    Product,
+    ProductItem,
+    Receipt,
+    ReceiptItem,
+    Source,
+    Transaction,
+    User,
+)
 from finance.sheets_client import SheetsClient, SheetsError
 
 
@@ -192,6 +202,8 @@ class SyncIsolationTests(TestCase):
             'receipts': [],
             'receipt_items': [],
             'giftcards': [],
+            'products': [],
+            'product_items': [],
         }
 
         result = sync_from_sheets(client, user=self.user_a)
@@ -527,3 +539,110 @@ class TransactionDetailTests(TestCase):
                 items=[{'name': 'Milk', 'amount': 1, 'unit': 'L', 'money': 12.5}],
             )
         self.assertIn('not linked to a receipt', str(ctx.exception))
+
+
+class ProductTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='products@example.com')
+        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.product = Product.objects.create(user=self.user, name='Toothpaste')
+
+    def add_transaction(self, row, value, amount, comment=''):
+        return Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=value,
+            change=Decimal(amount),
+            source=self.source,
+            category=self.groceries,
+            comment=comment,
+        )
+
+    def test_product_item_requires_price_for_transaction_link(self):
+        tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
+        with self.assertRaises(Exception):
+            ProductItem.objects.create(
+                user=self.user,
+                product=self.product,
+                transaction=tx,
+                price=None,
+            )
+
+    def test_product_item_xor_link_constraint(self):
+        tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
+        receipt = Receipt.objects.create(user=self.user, date=date(2026, 1, 1), total=Decimal('8.50'))
+        item = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Paste',
+            amount=Decimal('1'),
+            unit='tube',
+            money=Decimal('8.50'),
+        )
+        with self.assertRaises(Exception):
+            ProductItem.objects.create(
+                user=self.user,
+                product=self.product,
+                transaction=tx,
+                receipt_item=item,
+                price=Decimal('8.50'),
+            )
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 31))
+    def test_product_detail_stats(self, _localdate):
+        tx1 = self.add_transaction(1, date(2026, 1, 1), '-10.00')
+        tx2 = self.add_transaction(2, date(2026, 1, 21), '-12.00')
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx1,
+            price=Decimal('10.00'),
+        )
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx2,
+            price=Decimal('12.00'),
+        )
+
+        detail = get_product_detail(user=self.user, product_id=str(self.product.id))
+        self.assertEqual(detail['stats']['totalPurchases'], 2)
+        self.assertEqual(detail['stats']['totalSpent'], 22.0)
+        self.assertEqual(detail['stats']['lastPurchaseDate'], '2026-01-21')
+        self.assertEqual(detail['stats']['avgDaysBetweenPurchases'], 20.0)
+        self.assertAlmostEqual(detail['stats']['costPerDay'], 12.0 / 10)
+
+    def test_get_products_list(self):
+        tx = self.add_transaction(1, date(2026, 1, 10), '-5.00')
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx,
+            price=Decimal('5.00'),
+        )
+        rows = get_products(user=self.user)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['name'], 'Toothpaste')
+        self.assertEqual(rows[0]['purchaseCount'], 1)
+
+    @patch('finance.api_views.sheets_for')
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_create_product_api(self, _access_token, get_user, sheets_for):
+        get_user.return_value = self.user
+        client = MagicMock()
+        client.add_product.return_value = {'productId': 'abc', 'name': 'Shampoo'}
+        sheets_for.return_value = client
+
+        response = self.client.post(
+            '/api/products',
+            data={'name': 'Shampoo'},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        client.add_product.assert_called_once_with(name='Shampoo')

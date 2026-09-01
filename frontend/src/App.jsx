@@ -9,6 +9,8 @@ import Management from './pages/Management';
 import Transactions from './pages/Transactions';
 import TransactionDetail from './pages/TransactionDetail';
 import Giftcards from './pages/Giftcards';
+import Products from './pages/Products';
+import ProductDetail from './pages/ProductDetail';
 import { useAuth } from './hooks/useAuth';
 import { useFinanceData } from './hooks/useFinanceData';
 import { currentBalances } from './lib/transform';
@@ -20,14 +22,20 @@ export default function App() {
   const { pathname } = useLocation();
   const balances = useMemo(() => currentBalances(transactions), [transactions]);
   const isTransactionDetail = /^\/transactions\/[^/]+$/.test(pathname);
-  const skipLoading = pathname === '/health' || pathname === '/management' || isTransactionDetail;
+  const isProductDetail = /^\/products\/[^/]+$/.test(pathname);
+  const skipLoading =
+    pathname === '/health' ||
+    pathname === '/management' ||
+    isTransactionDetail ||
+    isProductDetail;
 
   useEffect(() => {
     if (!signedIn) return;
     if (pathname === '/health' || pathname === '/management') return;
     if (isTransactionDetail) return;
+    if (isProductDetail) return;
     refresh();
-  }, [pathname, refresh, signedIn, isTransactionDetail]);
+  }, [pathname, refresh, signedIn, isTransactionDetail, isProductDetail]);
 
   if (!signedIn) {
     return <SignInScreen onSignIn={signIn} error={authError} ready={ready} />;
@@ -90,6 +98,11 @@ export default function App() {
                 />
               }
             />
+            <Route
+              path="/products"
+              element={<Products onSaved={refresh} listVersion={listVersion} />}
+            />
+            <Route path="/products/:id" element={<ProductDetail onSaved={refresh} />} />
             <Route path="/chat" element={<ChatBot metadata={metadata} onSaved={refresh} />} />
             <Route path="/health" element={<Health />} />
             <Route path="/management" element={<Management />} />
