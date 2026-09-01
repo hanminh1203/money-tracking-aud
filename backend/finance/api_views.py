@@ -209,15 +209,34 @@ def transactions(request: HttpRequest) -> JsonResponse:
     return JsonResponse(result)
 
 
-@require_GET
+@require_http_methods(['GET', 'PUT'])
 @require_auth
 def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
     user: User = request.finance_user  # type: ignore[attr-defined]
+    if request.method == 'GET':
+        try:
+            data = db_get_transaction(user=user, transaction_id=transaction_id)
+        except ReaderError as exc:
+            return json_error(str(exc), status=exc.status)
+        return JsonResponse(data)
+
     try:
-        data = db_get_transaction(user=user, transaction_id=transaction_id)
-    except ReaderError as exc:
-        return json_error(str(exc), status=exc.status)
-    return JsonResponse(data)
+        body = parse_json(request)
+        result = sheets_for(request).update_transaction(
+            transaction_id,
+            date=body.get('date'),
+            amount=body.get('amount'),
+            type=body.get('type'),
+            source=body.get('source'),
+            sub_category=body.get('subCategory') or '',
+            comment=body.get('comment') or '',
+            items=body.get('items'),
+        )
+    except ValueError as exc:
+        return json_error(str(exc))
+    except SheetsError as exc:
+        return json_error(str(exc), status=exc.status or 400)
+    return JsonResponse(result)
 
 
 @require_GET

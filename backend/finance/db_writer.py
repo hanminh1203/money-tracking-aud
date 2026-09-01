@@ -280,3 +280,79 @@ def save_giftcard_use(
             )
     except Exception:
         logger.exception('Postgres dual-write failed for giftcard use %s', giftcard_id)
+
+
+def update_transaction_detail(
+    *,
+    user: User,
+    transaction: Transaction,
+    date: Any,
+    change: Any,
+    source: str,
+    comment: str,
+    sub_category: str,
+    receipt_total: Any | None = None,
+    items: list[dict] | None = None,
+    sibling_updates: list[Transaction] | None = None,
+) -> None:
+    """Update a transaction (and linked receipt items) after Sheets writes succeed."""
+    owner = _require_user(user)
+    try:
+        with db_transaction.atomic():
+            transaction.date = _parse_date(date)
+            transaction.change = _dec(change)
+            transaction.source_id = _resolve_source_id(source)
+            transaction.comment = str(comment or '')
+            transaction.category_id = _resolve_category_id(sub_category or '')
+            transaction.version = (transaction.version or 1) + 1
+            transaction.save(
+                update_fields=[
+                    'date',
+                    'change',
+                    'source_id',
+                    'comment',
+                    'category_id',
+                    'version',
+                ]
+            )
+
+            for sibling in sibling_updates or []:
+                sibling.date = transaction.date
+                sibling.comment = transaction.comment
+                sibling.category_id = transaction.category_id
+                sibling.version = (sibling.version or 1) + 1
+                sibling.save(update_fields=['date', 'comment', 'category_id', 'version'])
+
+            if transaction.receipt_id:
+                receipt = Receipt.objects.select_for_update().get(
+                    pk=transaction.receipt_id, user=owner
+                )
+                receipt.date = transaction.date
+                if receipt_total is not None:
+                    receipt.total = _dec(receipt_total)
+                receipt.version = (receipt.version or 1) + 1
+                receipt.save(update_fields=['date', 'total', 'version'])
+
+                if items is not None:
+                    ReceiptItem.objects.filter(receipt=receipt, user=owner).delete()
+                    ReceiptItem.objects.bulk_create(
+                        [
+                            ReceiptItem(
+                                id=uuid.uuid4(),
+                                version=1,
+                                user=owner,
+                                receipt=receipt,
+                                name=str(it['name']),
+                                amount=_dec(it['amount']),
+                                unit=str(it['unit']),
+                                money=_dec(it['money']),
+                            )
+                            for it in items
+                        ]
+                    )
+    except Exception:
+        logger.exception(
+            'Postgres dual-write failed for transaction update %s', transaction.id
+        )
+        raise
+

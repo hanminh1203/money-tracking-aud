@@ -67,6 +67,10 @@ export function getTransaction(id) {
   return api(`/transactions/${encodeURIComponent(id)}`);
 }
 
+export function updateTransaction(id, payload) {
+  return api(`/transactions/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+}
+
 export function getMetadata() {
   return api('/metadata');
 }

@@ -78,7 +78,7 @@ export default function App() {
                 />
               }
             />
-            <Route path="/transactions/:id" element={<TransactionDetail />} />
+            <Route path="/transactions/:id" element={<TransactionDetail onSaved={refresh} />} />
             <Route
               path="/giftcards"
               element={

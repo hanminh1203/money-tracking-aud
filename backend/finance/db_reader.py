@@ -91,6 +91,7 @@ def _receipt_items(receipt: Receipt) -> list[dict]:
     )
     return [
         {
+            'id': str(it.id),
             'name': it.name,
             'amount': _dec_to_number(it.amount),
             'unit': it.unit,
@@ -316,7 +317,7 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
         tx = (
             Transaction.objects.filter(user=user)
             .select_related('source', 'category', 'receipt')
-            .prefetch_related('receipt__items')
+            .prefetch_related('receipt__items', 'receipt__transactions__source')
             .get(pk=tid)
         )
     except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
@@ -328,6 +329,14 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
             'receiptId': str(tx.receipt.id),
             'date': tx.receipt.date.isoformat(),
             'total': _dec_to_number(tx.receipt.total),
+            'sources': [
+                {
+                    'transactionId': str(linked.id),
+                    'source': linked.source.name if linked.source_id else '',
+                    'amount': abs(_dec_to_number(linked.change)),
+                }
+                for linked in tx.receipt.transactions.all()
+            ],
             'items': _receipt_items(tx.receipt),
         }
     else:
