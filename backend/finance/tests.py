@@ -1,5 +1,6 @@
 from datetime import date
 from decimal import Decimal
+import uuid
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
@@ -190,6 +191,7 @@ class SyncIsolationTests(TestCase):
             'transactions': [
                 {
                     '__sheet_row': 2,
+                    'Transaction ID': 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
                     'Date': '2026-01-10',
                     'Change': '100',
                     'Source': 'Everyday',
@@ -215,6 +217,53 @@ class SyncIsolationTests(TestCase):
         self.assertEqual(Giftcard.objects.filter(user=self.user_b).count(), 1)
         self.assertEqual(Source.objects.count(), 1)
         self.assertEqual(Category.objects.count(), 1)
+        synced = Transaction.objects.get(user=self.user_a)
+        self.assertEqual(
+            str(synced.id), 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+        )
+
+    def test_sync_product_item_links_by_transaction_id(self):
+        tx_id = uuid.UUID('b2c3d4e5-f6a7-8901-bcde-f12345678901')
+        product_id = uuid.UUID('c3d4e5f6-a7b8-9012-cdef-123456789012')
+        product_item_id = uuid.UUID('d4e5f6a7-b8c9-0123-def0-234567890123')
+        client = MagicMock()
+        client.get_mirror_source_rows.return_value = {
+            'transactions': [
+                {
+                    '__sheet_row': 2,
+                    'Transaction ID': str(tx_id),
+                    'Date': '2026-01-10',
+                    'Change': '-25',
+                    'Source': 'Everyday',
+                    'Comment': 'Shop',
+                    'Sub category': 'Salary',
+                    'Receipt ID': '',
+                    'Giftcard ID': '',
+                }
+            ],
+            'receipts': [],
+            'receipt_items': [],
+            'giftcards': [],
+            'products': [
+                {'Product ID': str(product_id), 'Name': 'Milk'},
+            ],
+            'product_items': [
+                {
+                    'Product Item ID': str(product_item_id),
+                    'Product ID': str(product_id),
+                    'Price': '12.50',
+                    'Transaction ID': str(tx_id),
+                    'Receipt Item ID': '',
+                }
+            ],
+        }
+
+        result = sync_from_sheets(client, user=self.user_a)
+
+        self.assertTrue(result['ok'])
+        pi = ProductItem.objects.get(user=self.user_a, id=product_item_id)
+        self.assertEqual(pi.transaction_id, tx_id)
+        self.assertEqual(pi.price, Decimal('12.50'))
 
 
 class TransactionDetailTests(TestCase):

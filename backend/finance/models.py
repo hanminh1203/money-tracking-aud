@@ -195,7 +195,7 @@ class ProductItem(AuditedModel):
 
 
 class Transaction(AuditedModel):
-    """Mirrors Sheets Transactions row."""
+    """Mirrors Sheets Transactions row; id equals sheet Transaction ID."""
 
     user = models.ForeignKey(
         User,

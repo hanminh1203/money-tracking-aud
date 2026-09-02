@@ -25,6 +25,7 @@ from finance.models import (
 )
 
 TRANSACTION_HEADERS = [
+    'Transaction ID',
     'Date',
     'Change',
     'Source',
@@ -51,7 +52,7 @@ PRODUCT_ITEM_EXPORT_COLUMNS = [
     'Product Item ID',
     'Product ID',
     'Price',
-    'Transaction Row',
+    'Transaction ID',
     'Receipt Item ID',
 ]
 
@@ -647,6 +648,7 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
     """
     transactions = [
         [
+            str(tx.id),
             tx.date.isoformat(),
             _dec_cell(tx.change),
             tx.source.name if tx.source_id else '',
@@ -700,11 +702,10 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
             str(pi.id),
             str(pi.product_id),
             _dec_cell(pi.price) if pi.price is not None else '',
-            str(pi.transaction.row_number) if pi.transaction_id else '',
+            str(pi.transaction_id) if pi.transaction_id else '',
             str(pi.receipt_item_id) if pi.receipt_item_id else '',
         ]
         for pi in ProductItem.objects.filter(user=user)
-        .select_related('transaction')
         .order_by('product_id', 'creation_date')
         .iterator()
     ]

@@ -126,13 +126,22 @@ def _resolve_category_id(sub_category: str) -> uuid.UUID | None:
         raise ValueError(f'Sub category {text!r} not found') from exc
 
 
+def _resolve_transaction_id(row: dict) -> uuid.UUID:
+    tid = row.get('transaction_id') or row.get('id')
+    if tid:
+        return uuid.UUID(str(tid))
+    return uuid.uuid4()
+
+
 def save_transactions(rows: list[dict], *, user: User) -> None:
     """
     Insert Transaction rows.
 
-    Each row dict: date, change, source, row_number, comment?, sub_category?, receipt_id?, giftcard_id?
+    Each row dict: date, change, source, row_number, transaction_id?, comment?, sub_category?,
+    receipt_id?, giftcard_id?
     source / sub_category are sheet names resolved to Source / Category FKs.
     row_number is the 1-based Google Sheets row for the Transactions table.
+    transaction_id becomes Transaction.id when provided (matches sheet Transaction ID).
     """
     if not rows:
         return
@@ -144,7 +153,7 @@ def save_transactions(rows: list[dict], *, user: User) -> None:
             giftcard_id = row.get('giftcard_id')
             objs.append(
                 Transaction(
-                    id=uuid.uuid4(),
+                    id=_resolve_transaction_id(row),
                     version=1,
                     user=owner,
                     row_number=int(row['row_number']),
@@ -169,6 +178,7 @@ def save_transaction(
     change: Any,
     source: str,
     row_number: int,
+    transaction_id: Any = None,
     comment: str = '',
     sub_category: str = '',
     receipt_id: Any = None,
@@ -177,6 +187,7 @@ def save_transaction(
     save_transactions(
         [
             {
+                'transaction_id': transaction_id,
                 'date': date,
                 'change': change,
                 'source': source,
@@ -205,7 +216,7 @@ def save_receipt_bundle(
 
     receipt_id must equal the sheet Receipt ID (becomes Receipt.id).
     items: name, amount, unit, money
-    transactions: date, change, source, row_number, comment?, sub_category?
+    transactions: date, change, source, row_number, transaction_id?, comment?, sub_category?
     """
     owner = _require_user(user)
     try:
@@ -227,7 +238,7 @@ def save_receipt_bundle(
             Transaction.objects.bulk_create(
                 [
                     Transaction(
-                        id=uuid.uuid4(),
+                        id=_resolve_transaction_id(tx),
                         version=1,
                         user=owner,
                         row_number=int(tx['row_number']),
@@ -272,7 +283,7 @@ def save_giftcard_purchase(
             Transaction.objects.bulk_create(
                 [
                     Transaction(
-                        id=uuid.uuid4(),
+                        id=_resolve_transaction_id(tx),
                         version=1,
                         user=owner,
                         row_number=int(tx['row_number']),
@@ -300,6 +311,7 @@ def save_giftcard_use(
     comment: str,
     sub_category: str,
     row_number: int,
+    transaction_id: Any = None,
 ) -> None:
     """Insert use Transaction and update Giftcard.balance in one DB transaction."""
     owner = _require_user(user)
@@ -312,7 +324,7 @@ def save_giftcard_use(
             if not updated:
                 raise ValueError(f'Giftcard {gid} not found')
             Transaction.objects.create(
-                id=uuid.uuid4(),
+                id=_resolve_transaction_id({'transaction_id': transaction_id}),
                 version=1,
                 user=owner,
                 row_number=int(row_number),

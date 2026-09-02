@@ -203,8 +203,10 @@ export default function Management() {
             <code className="text-xs">Product ID</code>, <code className="text-xs">Name</code>) and{' '}
             <code className="text-xs">Product_Items</code> (
             <code className="text-xs">Product Item ID</code>, <code className="text-xs">Product ID</code>,{' '}
-            <code className="text-xs">Price</code>, <code className="text-xs">Transaction Row</code>,{' '}
+            <code className="text-xs">Price</code>, <code className="text-xs">Transaction ID</code>,{' '}
             <code className="text-xs">Receipt Item ID</code>). Add a{' '}
+            <code className="text-xs">Transaction ID</code> column as the first column in{' '}
+            <code className="text-xs">Transactions</code>. Add a{' '}
             <code className="text-xs">Receipt Item ID</code> column as the first column in{' '}
             <code className="text-xs">Receipt_Items</code>.
           </p>
