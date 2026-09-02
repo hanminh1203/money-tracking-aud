@@ -291,7 +291,28 @@ def _parse_sheet_fingerprints(source: dict[str, list[dict]]) -> dict[str, list[t
         _giftcard_fp(*_parse_giftcard_row(row, i)) for i, row in enumerate(source['giftcards'])
     ]
     transactions = [
-        _tx_fp(*_parse_tx_row(row, i)) for i, row in enumerate(source['transactions'])
+        _tx_fp(
+            transaction_id,
+            d,
+            change,
+            source_name,
+            comment,
+            sub_category,
+            receipt_id,
+            giftcard_id,
+        )
+        for i, row in enumerate(source['transactions'])
+        for (
+            transaction_id,
+            _row_number,
+            d,
+            change,
+            source_name,
+            comment,
+            sub_category,
+            receipt_id,
+            giftcard_id,
+        ) in [_parse_tx_row(row, i)]
     ]
     products = [
         _product_fp(*_parse_product_row(row, i)) for i, row in enumerate(source.get('products', []))
