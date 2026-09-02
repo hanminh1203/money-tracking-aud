@@ -14,10 +14,19 @@ from finance import db_writer
 
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
-INPUT_COLUMNS = ['Date', 'Change', 'Source', 'Comment', 'Sub category']
+TRANSACTION_ID_COLUMN = 'Transaction ID'
+INPUT_COLUMNS = [
+    TRANSACTION_ID_COLUMN,
+    'Date',
+    'Change',
+    'Source',
+    'Comment',
+    'Sub category',
+]
 RECEIPT_COLUMNS = ['Receipt ID', 'Date', 'Total']
 RECEIPT_ITEM_COLUMNS = ['Receipt Item ID', 'Receipt ID', 'Name', 'Amount', 'Unit', 'Money']
 RECEIPT_TX_COLUMNS = [
+    TRANSACTION_ID_COLUMN,
     'Date',
     'Change',
     'Source',
@@ -31,11 +40,12 @@ PRODUCT_ITEM_COLUMNS = [
     'Product Item ID',
     'Product ID',
     'Price',
-    'Transaction Row',
+    'Transaction ID',
     'Receipt Item ID',
 ]
 # Giftcard ID sits after Receipt ID so columns stay contiguous in the sheet table.
 GIFTCARD_TX_COLUMNS = [
+    TRANSACTION_ID_COLUMN,
     'Date',
     'Change',
     'Source',
@@ -709,8 +719,9 @@ class SheetsClient:
         if not source:
             raise SheetsError('Source is required')
         signed = -abs_amt if type == 'Expense' else abs_amt
+        transaction_id = str(uuid.uuid4())
         row_number = self.append_transaction_row(
-            [date, signed, source, comment or '', sub_category or '']
+            [transaction_id, date, signed, source, comment or '', sub_category or '']
         )
         db_writer.save_transaction(
             user=self.user,
@@ -720,6 +731,7 @@ class SheetsClient:
             comment=comment or '',
             sub_category=sub_category or '',
             row_number=row_number,
+            transaction_id=transaction_id,
         )
         return {'added': 1}
 
@@ -743,15 +755,18 @@ class SheetsClient:
         if from_source == to_source:
             raise SheetsError('Source and destination must differ')
         note = comment or 'Exchange'
+        from_tx_id = str(uuid.uuid4())
+        to_tx_id = str(uuid.uuid4())
         from_row = self.append_transaction_row(
-            [date, -abs_amt, from_source, note, 'Exchange (self)']
+            [from_tx_id, date, -abs_amt, from_source, note, 'Exchange (self)']
         )
         to_row = self.append_transaction_row(
-            [date, abs_amt, to_source, note, 'Exchange (self)']
+            [to_tx_id, date, abs_amt, to_source, note, 'Exchange (self)']
         )
         db_writer.save_transactions(
             [
                 {
+                    'transaction_id': from_tx_id,
                     'date': date,
                     'change': -abs_amt,
                     'source': from_source,
@@ -760,6 +775,7 @@ class SheetsClient:
                     'row_number': from_row,
                 },
                 {
+                    'transaction_id': to_tx_id,
                     'date': date,
                     'change': abs_amt,
                     'source': to_source,
@@ -856,12 +872,23 @@ class SheetsClient:
                 for it in normalized_items
             ],
         )
+        tx_specs = [
+            (str(uuid.uuid4()), s) for s in normalized_sources
+        ]
         tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
             RECEIPT_TX_COLUMNS,
             [
-                [date, -s['amount'], s['source'], comment_text, sub_category, receipt_id]
-                for s in normalized_sources
+                [
+                    tx_id,
+                    date,
+                    -s['amount'],
+                    s['source'],
+                    comment_text,
+                    sub_category,
+                    receipt_id,
+                ]
+                for tx_id, s in tx_specs
             ],
         )
 
@@ -873,6 +900,7 @@ class SheetsClient:
             items=normalized_items,
             transactions=[
                 {
+                    'transaction_id': tx_id,
                     'date': date,
                     'change': -s['amount'],
                     'source': s['source'],
@@ -880,7 +908,7 @@ class SheetsClient:
                     'sub_category': sub_category,
                     'row_number': tx_row_numbers[i],
                 }
-                for i, s in enumerate(normalized_sources)
+                for i, (tx_id, s) in enumerate(tx_specs)
             ],
         )
 
@@ -1120,12 +1148,24 @@ class SheetsClient:
             GIFTCARD_COLUMNS,
             [[giftcard_id, shop_name, date, abs_amt]],
         )
+        debit_tx_id = str(uuid.uuid4())
+        credit_tx_id = str(uuid.uuid4())
         tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
             GIFTCARD_TX_COLUMNS,
             [
-                [date, -abs_amt, payment_source, note, sub_category, '', giftcard_id],
                 [
+                    debit_tx_id,
+                    date,
+                    -abs_amt,
+                    payment_source,
+                    note,
+                    sub_category,
+                    '',
+                    giftcard_id,
+                ],
+                [
+                    credit_tx_id,
                     date,
                     abs_amt,
                     GIFTCARD_SOURCE_NAME,
@@ -1146,6 +1186,7 @@ class SheetsClient:
             row_number=gc_row_numbers[0],
             transactions=[
                 {
+                    'transaction_id': debit_tx_id,
                     'date': date,
                     'change': -abs_amt,
                     'source': payment_source,
@@ -1154,6 +1195,7 @@ class SheetsClient:
                     'row_number': tx_row_numbers[0],
                 },
                 {
+                    'transaction_id': credit_tx_id,
                     'date': date,
                     'change': abs_amt,
                     'source': GIFTCARD_SOURCE_NAME,
@@ -1209,10 +1251,11 @@ class SheetsClient:
         note = (comment or '').strip() or f'Use giftcard: {card.shop}'
         date = date_cls.today().isoformat()
 
+        transaction_id = str(uuid.uuid4())
         tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
             GIFTCARD_TX_COLUMNS,
-            [[date, -abs_amt, GIFTCARD_SOURCE_NAME, note, category, '', gid]],
+            [[transaction_id, date, -abs_amt, GIFTCARD_SOURCE_NAME, note, category, '', gid]],
         )
         self.update_table_cell_at_row(
             settings.GIFTCARD_TABLE,
@@ -1230,6 +1273,7 @@ class SheetsClient:
             comment=note,
             sub_category=category,
             row_number=tx_row_numbers[0],
+            transaction_id=transaction_id,
         )
         return {
             'giftcardId': gid,
@@ -1328,7 +1372,7 @@ class SheetsClient:
         except (Product.DoesNotExist, ValueError) as exc:
             raise SheetsError('Product not found', status=404) from exc
 
-        tx_row = ''
+        tx_sheet_value = ''
         sheet_price = ''
         if tx_id:
             try:
@@ -1343,7 +1387,7 @@ class SheetsClient:
                 raise SheetsError('Invalid price')
             if not sheet_price:
                 raise SheetsError('Invalid price')
-            tx_row = str(tx.row_number)
+            tx_sheet_value = str(tx.id)
         else:
             try:
                 ReceiptItem.objects.get(pk=ri_id, user=self.user)
@@ -1359,7 +1403,7 @@ class SheetsClient:
         self.append_rows(
             settings.PRODUCT_ITEMS_TABLE,
             PRODUCT_ITEM_COLUMNS,
-            [[product_item_id, pid, sheet_price, tx_row, ri_id or '']],
+            [[product_item_id, pid, sheet_price, tx_sheet_value, ri_id or '']],
         )
         db_writer.save_product_item(
             user=self.user,

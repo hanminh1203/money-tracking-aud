@@ -111,7 +111,7 @@ def _giftcard_fp(
 
 
 def _tx_fp(
-    row_number: int,
+    transaction_id: uuid.UUID,
     d: date,
     change: Decimal,
     source: str,
@@ -121,7 +121,7 @@ def _tx_fp(
     giftcard_id: uuid.UUID | None,
 ) -> tuple:
     return (
-        int(row_number),
+        str(transaction_id),
         d.isoformat(),
         _fp_dec(change),
         str(source or '').strip(),
@@ -180,14 +180,14 @@ def _product_item_fp(
     product_item_id: uuid.UUID,
     product_id: uuid.UUID,
     price: Decimal | None,
-    transaction_row: int | None,
+    transaction_id: uuid.UUID | None,
     receipt_item_id: uuid.UUID | None,
 ) -> tuple:
     return (
         str(product_item_id),
         str(product_id),
         _fp_dec(price) if price is not None else '',
-        str(transaction_row) if transaction_row else '',
+        str(transaction_id) if transaction_id else '',
         str(receipt_item_id) if receipt_item_id else '',
     )
 
@@ -207,7 +207,7 @@ def _parse_product_row(row: dict, index: int) -> tuple[uuid.UUID, str]:
 
 def _parse_product_item_row(
     row: dict, index: int
-) -> tuple[uuid.UUID, uuid.UUID, Decimal | None, int | None, uuid.UUID | None]:
+) -> tuple[uuid.UUID, uuid.UUID, Decimal | None, uuid.UUID | None, uuid.UUID | None]:
     try:
         pi_id = _optional_uuid(_cell(row, 'Product Item ID'))
         if pi_id is None:
@@ -217,14 +217,13 @@ def _parse_product_item_row(
             raise ValueError('Product ID is required')
         price_raw = _cell(row, 'Price')
         price = _sheet_dec(price_raw) if str(price_raw or '').strip() else None
-        tx_row_raw = _cell(row, 'Transaction Row')
-        tx_row = int(tx_row_raw) if str(tx_row_raw or '').strip() else None
+        transaction_id = _optional_uuid(_cell(row, 'Transaction ID'))
         receipt_item_id = _optional_uuid(_cell(row, 'Receipt Item ID'))
-        if bool(tx_row) == bool(receipt_item_id):
-            raise ValueError('Exactly one of Transaction Row or Receipt Item ID is required')
-        if tx_row is not None and price is None:
-            raise ValueError('Price is required when Transaction Row is set')
-        return pi_id, product_id, price, tx_row, receipt_item_id
+        if bool(transaction_id) == bool(receipt_item_id):
+            raise ValueError('Exactly one of Transaction ID or Receipt Item ID is required')
+        if transaction_id is not None and price is None:
+            raise ValueError('Price is required when Transaction ID is set')
+        return pi_id, product_id, price, transaction_id, receipt_item_id
     except ValueError as exc:
         raise SyncError(f'Product item row {index + 1}: {exc}') from exc
 
@@ -255,8 +254,11 @@ def _parse_giftcard_row(
 
 def _parse_tx_row(
     row: dict, index: int
-) -> tuple[int, date, Decimal, str, str, str, uuid.UUID | None, uuid.UUID | None]:
+) -> tuple[uuid.UUID, int, date, Decimal, str, str, str, uuid.UUID | None, uuid.UUID | None]:
     try:
+        transaction_id = _optional_uuid(_cell(row, 'Transaction ID'))
+        if transaction_id is None:
+            raise ValueError('Transaction ID is required')
         source_name = str(_cell(row, 'Source') or '').strip()
         if not source_name:
             raise ValueError('Source is required')
@@ -264,6 +266,7 @@ def _parse_tx_row(
         if sheet_row is None:
             raise ValueError('Sheet row number is required')
         return (
+            transaction_id,
             int(sheet_row),
             _parse_date(_cell(row, 'Date')),
             _sheet_dec(_cell(row, 'Change')),
@@ -322,7 +325,7 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
     ]
     transactions = [
         _tx_fp(
-            tx.row_number,
+            tx.id,
             tx.date,
             tx.change,
             tx.source.name if tx.source_id else '',
@@ -343,12 +346,10 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
             pi.id,
             pi.product_id,
             pi.price,
-            pi.transaction.row_number if pi.transaction_id else None,
+            pi.transaction_id,
             pi.receipt_item_id,
         )
-        for pi in ProductItem.objects.filter(user=user)
-        .select_related('transaction')
-        .iterator()
+        for pi in ProductItem.objects.filter(user=user).iterator()
     ]
     return {
         'receipt': receipts,
@@ -452,8 +453,10 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
 
     tx_objs: list[Transaction] = []
     seen_tx_rows: set[int] = set()
+    seen_tx_ids: set[uuid.UUID] = set()
     for i, row in enumerate(source['transactions']):
         (
+            transaction_id,
             row_number,
             d,
             change,
@@ -467,7 +470,12 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
             raise SyncError(
                 f'Transaction row {i + 1}: duplicate sheet row_number {row_number}'
             )
+        if transaction_id in seen_tx_ids:
+            raise SyncError(
+                f'Transaction row {i + 1}: duplicate Transaction ID {transaction_id}'
+            )
         seen_tx_rows.add(row_number)
+        seen_tx_ids.add(transaction_id)
         if source_name not in source_by_name:
             raise SyncError(
                 f'Transaction row {i + 1}: Source {source_name!r} not found '
@@ -491,7 +499,7 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
             )
         tx_objs.append(
             Transaction(
-                id=uuid.uuid4(),
+                id=transaction_id,
                 version=1,
                 user=user,
                 row_number=row_number,
@@ -514,13 +522,15 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
         seen_product_ids.add(pid)
         product_objs.append(Product(id=pid, version=1, user=user, name=name))
 
-    tx_by_row = {tx.row_number: tx for tx in tx_objs}
+    tx_by_id = {tx.id: tx for tx in tx_objs}
     receipt_item_by_id = {it.id: it for it in item_objs}
 
     product_item_objs: list[ProductItem] = []
     seen_product_item_ids: set[uuid.UUID] = set()
     for i, row in enumerate(source.get('product_items', [])):
-        pi_id, product_id, price, tx_row, receipt_item_id = _parse_product_item_row(row, i)
+        pi_id, product_id, price, sheet_tx_id, receipt_item_id = _parse_product_item_row(
+            row, i
+        )
         if pi_id in seen_product_item_ids:
             raise SyncError(f'Product item row {i + 1}: duplicate Product Item ID {pi_id}')
         seen_product_item_ids.add(pi_id)
@@ -529,12 +539,12 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
                 f'Product item row {i + 1}: Product ID {product_id} not found in Product table'
             )
         transaction_id = None
-        if tx_row is not None:
-            if tx_row not in tx_by_row:
+        if sheet_tx_id is not None:
+            if sheet_tx_id not in tx_by_id:
                 raise SyncError(
-                    f'Product item row {i + 1}: Transaction Row {tx_row} not found'
+                    f'Product item row {i + 1}: Transaction ID {sheet_tx_id} not found'
                 )
-            transaction_id = tx_by_row[tx_row].id
+            transaction_id = sheet_tx_id
         if receipt_item_id is not None and receipt_item_id not in receipt_item_by_id:
             raise SyncError(
                 f'Product item row {i + 1}: Receipt Item ID {receipt_item_id} not found'
