@@ -818,9 +818,51 @@ class SheetsClient:
             except (TypeError, ValueError):
                 raise SheetsError('Invalid amount')
             if not pay_source or not amt:
-                raise SheetsError('At least one payment is required')
+                raise SheetsError('At least one payment or giftcard payment is required')
             payment_rows.append({'source': pay_source, 'amount': amt})
         return payment_rows, giftcard_rows
+
+    def plan_giftcard_debits(self, giftcard_payments: list[dict] | None) -> list[dict]:
+        """Validate giftcard balances and return planned debits (no writes)."""
+        from finance.funding import aggregate_giftcard_debits, validate_giftcard_debit
+        from finance.models import Giftcard
+
+        try:
+            totals = aggregate_giftcard_debits(giftcard_payments)
+        except ValueError as exc:
+            raise SheetsError(str(exc)) from exc
+        if not totals:
+            return []
+
+        planned: list[dict] = []
+        for gid, amount in totals.items():
+            try:
+                card = Giftcard.objects.get(pk=gid, user=self.user)
+            except (Giftcard.DoesNotExist, ValueError) as exc:
+                raise SheetsError(f'Giftcard not found: {gid}', status=404) from exc
+            try:
+                new_balance = validate_giftcard_debit(card.balance, amount)
+            except ValueError as exc:
+                raise SheetsError(str(exc)) from exc
+            planned.append(
+                {
+                    'giftcard_id': gid,
+                    'amount': float(amount),
+                    'new_balance': float(new_balance),
+                    'row_number': card.row_number,
+                }
+            )
+        return planned
+
+    def apply_giftcard_debits(self, giftcard_debits: list[dict] | None) -> None:
+        """Write planned giftcard balance updates to the Giftcards sheet."""
+        for row in giftcard_debits or []:
+            self.update_table_cell_at_row(
+                settings.GIFTCARD_TABLE,
+                sheet_row=int(row['row_number']),
+                update_column='Balance',
+                new_value=row['new_balance'],
+            )
 
     def add_transaction(
         self,
@@ -854,6 +896,8 @@ class SheetsClient:
         except ValueError as exc:
             raise SheetsError(str(exc)) from exc
 
+        giftcard_debits = self.plan_giftcard_debits(giftcard_rows)
+
         transaction_id = str(uuid.uuid4())
         row_number = self.append_transaction_row(
             [transaction_id, date, signed, comment or '', sub_category or '']
@@ -863,6 +907,7 @@ class SheetsClient:
             payments=payment_rows,
             giftcard_payments=giftcard_rows,
         )
+        self.apply_giftcard_debits(giftcard_debits)
         db_writer.save_transaction_bundle(
             user=self.user,
             date=date,
@@ -873,6 +918,7 @@ class SheetsClient:
             transaction_id=transaction_id,
             payments=saved_payments,
             giftcard_payments=saved_giftcard_payments,
+            giftcard_debits=giftcard_debits,
         )
         return {'added': 1}
 
@@ -1020,6 +1066,7 @@ class SheetsClient:
         giftcard_rows = [
             s for s in normalized_sources if 'giftcard_id' in s
         ]
+        giftcard_debits = self.plan_giftcard_debits(giftcard_rows)
 
         self.append_rows(
             settings.RECEIPT_TABLE, RECEIPT_COLUMNS, [[receipt_id, date, total]]
@@ -1040,6 +1087,7 @@ class SheetsClient:
             payments=payment_rows,
             giftcard_payments=giftcard_rows,
         )
+        self.apply_giftcard_debits(giftcard_debits)
 
         db_writer.save_receipt_bundle(
             user=self.user,
@@ -1056,6 +1104,7 @@ class SheetsClient:
             },
             payments=saved_payments,
             giftcard_payments=saved_giftcard_payments,
+            giftcard_debits=giftcard_debits,
         )
 
         return {

@@ -100,6 +100,21 @@ def _dec(value: Any) -> Decimal:
         raise ValueError(f'Invalid decimal: {value!r}') from exc
 
 
+def _apply_giftcard_balance_updates(
+    *,
+    owner: User,
+    giftcard_debits: list[dict] | None,
+) -> None:
+    """Set Giftcard.balance from planned debit rows ({giftcard_id, new_balance})."""
+    for row in giftcard_debits or []:
+        gid = uuid.UUID(str(row['giftcard_id']))
+        updated = Giftcard.objects.filter(pk=gid, user=owner).update(
+            balance=_dec(row['new_balance'])
+        )
+        if not updated:
+            raise ValueError(f'Giftcard {gid} not found')
+
+
 def _require_user(user: User | None) -> User:
     if user is None:
         raise ValueError('User is required')
@@ -196,6 +211,7 @@ def save_transaction_bundle(
     receipt_id: Any = None,
     payments: list[dict] | None = None,
     giftcard_payments: list[dict] | None = None,
+    giftcard_debits: list[dict] | None = None,
 ) -> None:
     """Insert one Transaction with Payment and/or GiftcardPayment rows."""
     owner = _require_user(user)
@@ -223,6 +239,7 @@ def save_transaction_bundle(
                 payments=payment_rows,
                 giftcard_payments=giftcard_rows,
             )
+            _apply_giftcard_balance_updates(owner=owner, giftcard_debits=giftcard_debits)
     except Exception:
         logger.exception('Postgres dual-write failed for transaction bundle %s', tid)
 
@@ -292,6 +309,7 @@ def save_receipt_bundle(
     transaction: dict,
     payments: list[dict],
     giftcard_payments: list[dict] | None = None,
+    giftcard_debits: list[dict] | None = None,
 ) -> None:
     """Insert Receipt + ReceiptItems + one linked Transaction with funding rows."""
     owner = _require_user(user)
@@ -331,6 +349,7 @@ def save_receipt_bundle(
                 payments=payments,
                 giftcard_payments=list(giftcard_payments or []),
             )
+            _apply_giftcard_balance_updates(owner=owner, giftcard_debits=giftcard_debits)
     except Exception:
         logger.exception('Postgres dual-write failed for receipt bundle %s', receipt_id)
 

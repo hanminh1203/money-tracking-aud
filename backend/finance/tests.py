@@ -745,3 +745,158 @@ class ProductTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         client.add_product.assert_called_once_with(name='Shampoo')
+
+
+class FundingTests(TestCase):
+    def test_validate_funding_allows_giftcard_only(self):
+        from finance.funding import validate_funding
+
+        validate_funding(
+            '-25',
+            [],
+            [{'giftcard_id': 'g1', 'amount': '25'}],
+        )
+
+    def test_aggregate_giftcard_debits(self):
+        from finance.funding import aggregate_giftcard_debits
+
+        totals = aggregate_giftcard_debits(
+            [
+                {'giftcardId': 'aaa', 'amount': '10'},
+                {'giftcard_id': 'aaa', 'amount': '5.50'},
+                {'giftcard_id': 'bbb', 'amount': '3'},
+            ]
+        )
+        self.assertEqual(totals['aaa'], Decimal('15.50'))
+        self.assertEqual(totals['bbb'], Decimal('3'))
+
+    def test_validate_giftcard_debit_rejects_overspend(self):
+        from finance.funding import validate_giftcard_debit
+
+        self.assertEqual(validate_giftcard_debit('20.00', '7.50'), Decimal('12.50'))
+        with self.assertRaises(ValueError) as ctx:
+            validate_giftcard_debit('10.00', '10.50')
+        self.assertIn('exceeds giftcard balance', str(ctx.exception))
+
+
+class GiftcardDebitWriteTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='gc-debit@example.com')
+        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.giftcard = Giftcard.objects.create(
+            user=self.user,
+            row_number=2,
+            shop='Coles',
+            date=date(2026, 1, 1),
+            balance=Decimal('40.00'),
+        )
+
+    def test_save_transaction_bundle_debits_giftcard(self):
+        from finance import db_writer
+
+        gid = str(self.giftcard.id)
+        db_writer.save_transaction_bundle(
+            user=self.user,
+            date='2026-01-15',
+            change='-50.00',
+            row_number=1,
+            sub_category='Groceries',
+            comment='Mixed pay',
+            payments=[
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': '30.00',
+                    'row_number': 1,
+                }
+            ],
+            giftcard_payments=[
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': gid,
+                    'amount': '20.00',
+                    'row_number': 1,
+                }
+            ],
+            giftcard_debits=[{'giftcard_id': gid, 'new_balance': '20.00'}],
+        )
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('20.00'))
+        tx = Transaction.objects.get(user=self.user, row_number=1)
+        self.assertEqual(tx.payments.count(), 1)
+        self.assertEqual(tx.giftcard_payments.count(), 1)
+
+    def test_plan_giftcard_debits_rejects_overspend(self):
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        with self.assertRaises(SheetsError) as ctx:
+            client.plan_giftcard_debits(
+                [{'giftcard_id': str(self.giftcard.id), 'amount': '50'}]
+            )
+        self.assertIn('exceeds giftcard balance', str(ctx.exception))
+
+    def test_plan_giftcard_debits_aggregates_same_card(self):
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        planned = client.plan_giftcard_debits(
+            [
+                {'giftcard_id': str(self.giftcard.id), 'amount': '10'},
+                {'giftcard_id': str(self.giftcard.id), 'amount': '5'},
+            ]
+        )
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0]['amount'], 15.0)
+        self.assertEqual(planned[0]['new_balance'], 25.0)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
+    def test_add_transaction_applies_giftcard_debit(
+        self, _append_tx, append_funding, apply_debits
+    ):
+        from finance import db_writer
+
+        gid = str(self.giftcard.id)
+        append_funding.return_value = (
+            [
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': 30.0,
+                    'row_number': 1,
+                }
+            ],
+            [
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': gid,
+                    'amount': 20.0,
+                    'row_number': 1,
+                }
+            ],
+        )
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        with patch.object(db_writer, 'save_transaction_bundle', wraps=db_writer.save_transaction_bundle) as save_bundle:
+            result = client.add_transaction(
+                date='2026-01-15',
+                amount=50,
+                type='Expense',
+                sub_category='Groceries',
+                comment='Shop',
+                payments=[{'source': 'Everyday', 'amount': 30}],
+                giftcard_payments=[{'giftcardId': gid, 'amount': 20}],
+            )
+        self.assertEqual(result['added'], 1)
+        apply_debits.assert_called_once()
+        debits = apply_debits.call_args.args[0]
+        self.assertEqual(debits[0]['new_balance'], 20.0)
+        save_bundle.assert_called_once()
+        self.assertEqual(
+            save_bundle.call_args.kwargs['giftcard_debits'][0]['new_balance'],
+            20.0,
+        )
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('20.00'))

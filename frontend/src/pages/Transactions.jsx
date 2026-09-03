@@ -79,7 +79,7 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
       </Card>
 
       {modal === 'add' && (
-        <Modal title="Add Transaction" onClose={closeModal} maxWidth="max-w-lg">
+        <Modal title="Add Transaction" onClose={closeModal} maxWidth="max-w-2xl">
           <AddTransactionForm key="add" metadata={metadata} onSaved={onSaved} onClose={closeModal} />
         </Modal>
       )}

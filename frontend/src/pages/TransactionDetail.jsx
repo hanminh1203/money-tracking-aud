@@ -7,7 +7,15 @@ import ReceiptItemsEditor, {
   emptyReceiptItem,
   toReceiptItemForm,
 } from '../components/ReceiptItemsEditor';
-import { getMetadata, getProducts, getTransaction, updateTransaction, createProductItem, deleteProductItem } from '../lib/api';
+import {
+  getGiftcards,
+  getMetadata,
+  getProducts,
+  getTransaction,
+  updateTransaction,
+  createProductItem,
+  deleteProductItem,
+} from '../lib/api';
 import { formatAUD, formatDateShort, parseDate } from '../lib/transform';
 
 function BackLink() {
@@ -111,7 +119,17 @@ function initialPayments(data) {
       amount: data.change == null ? '' : String(Math.abs(Number(data.change))),
     });
   }
-  return rows.length ? rows : [{ source: '', amount: '' }];
+  if (rows.length) return rows;
+  if ((data.giftcardPayments || []).length) return [];
+  return [{ source: '', amount: '' }];
+}
+
+function initialGiftcardPayments(data) {
+  return (data.giftcardPayments || []).map((gp) => ({
+    giftcardId: gp.giftcardId || '',
+    shop: gp.shop || '',
+    amount: gp.amount == null ? '' : String(gp.amount),
+  }));
 }
 
 function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
@@ -128,12 +146,8 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     data.change == null ? '' : String(Math.abs(Number(data.change)))
   );
   const [payments, setPayments] = useState(initialPayments(data));
-  const [giftcardPayments, setGiftcardPayments] = useState(
-    (data.giftcardPayments || []).map((gp) => ({
-      giftcardId: gp.giftcardId || '',
-      amount: gp.amount == null ? '' : String(gp.amount),
-    }))
-  );
+  const [giftcardPayments, setGiftcardPayments] = useState(initialGiftcardPayments(data));
+  const [giftcards, setGiftcards] = useState([]);
   const [subCategory, setSubCategory] = useState(data.subCategory || '');
   const [comment, setComment] = useState(data.comment || '');
   const [items, setItems] = useState(
@@ -160,6 +174,38 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
       .then((rows) => setCatalogProducts(Array.isArray(rows) ? rows : []))
       .catch(() => setCatalogProducts([]));
   }, []);
+
+  useEffect(() => {
+    getGiftcards()
+      .then((rows) => setGiftcards(Array.isArray(rows) ? rows : []))
+      .catch(() => setGiftcards([]));
+  }, []);
+
+  const paymentSources = useMemo(
+    () => (metadata.sources || []).filter((s) => s.name !== 'Giftcard'),
+    [metadata.sources]
+  );
+
+  const giftcardOptions = useMemo(() => {
+    const byId = new Map();
+    for (const g of giftcards) {
+      byId.set(String(g.id), {
+        id: String(g.id),
+        shop: g.shop,
+        balance: Number(g.balance) || 0,
+      });
+    }
+    for (const gp of data.giftcardPayments || []) {
+      const id = String(gp.giftcardId || '');
+      if (!id || byId.has(id)) continue;
+      byId.set(id, {
+        id,
+        shop: gp.shop || 'Giftcard',
+        balance: 0,
+      });
+    }
+    return Array.from(byId.values());
+  }, [giftcards, data.giftcardPayments]);
 
   const categoryOptions = useMemo(() => {
     const filtered = (metadata.categories || []).filter((c) => c.type === type);
@@ -295,6 +341,10 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                   key={t}
                   onClick={() => {
                     setType(t);
+                    if (t === 'Income') {
+                      setGiftcardPayments([]);
+                      setPayments((prev) => (prev.length === 0 ? [{ source: '', amount: '' }] : prev));
+                    }
                     if (subCategory) {
                       const stillValid = (metadata.categories || []).some(
                         (c) => c.subCategory === subCategory && c.type === t
@@ -345,47 +395,55 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
 
             <Field label="Payments">
               <div className="space-y-2">
-                {payments.map((p, index) => (
-                  <div key={index} className="grid grid-cols-[1fr_7rem_auto] gap-2 items-center">
-                    <select
-                      value={p.source}
-                      onChange={(e) =>
-                        setPayments((prev) =>
-                          prev.map((row, i) => (i === index ? { ...row, source: e.target.value } : row))
-                        )
-                      }
-                      className={selectClass}
-                    >
-                      <option value="">Source</option>
-                      {(metadata.sources || []).map((s) => (
-                        <option key={s.name} value={s.name}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={p.amount}
-                      onChange={(e) =>
-                        setPayments((prev) =>
-                          prev.map((row, i) => (i === index ? { ...row, amount: e.target.value } : row))
-                        )
-                      }
-                      className={inputClass}
-                      placeholder="0.00"
-                    />
-                    <button
-                      type="button"
-                      className="text-xs text-text-muted hover:text-expense px-2"
-                      onClick={() => setPayments((prev) => prev.filter((_, i) => i !== index))}
-                      disabled={payments.length === 1 && !giftcardPayments.length}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
+                {payments.length === 0 ? (
+                  <p className="text-sm text-text-muted">
+                    {type === 'Expense'
+                      ? 'Optional when paid fully with giftcards.'
+                      : 'Add at least one payment source.'}
+                  </p>
+                ) : (
+                  payments.map((p, index) => (
+                    <div key={index} className="grid grid-cols-[1fr_7rem_auto] gap-2 items-center">
+                      <select
+                        value={p.source}
+                        onChange={(e) =>
+                          setPayments((prev) =>
+                            prev.map((row, i) => (i === index ? { ...row, source: e.target.value } : row))
+                          )
+                        }
+                        className={selectClass}
+                      >
+                        <option value="">Source</option>
+                        {paymentSources.map((s) => (
+                          <option key={s.name} value={s.name}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={p.amount}
+                        onChange={(e) =>
+                          setPayments((prev) =>
+                            prev.map((row, i) => (i === index ? { ...row, amount: e.target.value } : row))
+                          )
+                        }
+                        className={inputClass}
+                        placeholder="0.00"
+                      />
+                      <button
+                        type="button"
+                        className="text-xs text-text-muted hover:text-expense px-2"
+                        disabled={type === 'Income' && payments.length === 1 && !giftcardPayments.length}
+                        onClick={() => setPayments((prev) => prev.filter((_, i) => i !== index))}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))
+                )}
                 <button
                   type="button"
                   className="text-sm text-accent hover:text-accent-hover"
@@ -395,6 +453,88 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                 </button>
               </div>
             </Field>
+
+            {type === 'Expense' && (
+              <Field label="Giftcards">
+                <div className="space-y-2">
+                  {giftcardPayments.length === 0 ? (
+                    <p className="text-sm text-text-muted">No giftcard payments.</p>
+                  ) : (
+                    giftcardPayments.map((p, index) => {
+                      const selected = giftcardOptions.find((g) => String(g.id) === String(p.giftcardId));
+                      return (
+                        <div key={index} className="grid grid-cols-[1fr_7rem_auto] gap-2 items-center">
+                          <select
+                            value={p.giftcardId}
+                            onChange={(e) => {
+                              const next = giftcardOptions.find((g) => String(g.id) === e.target.value);
+                              setGiftcardPayments((prev) =>
+                                prev.map((row, i) =>
+                                  i === index
+                                    ? {
+                                        ...row,
+                                        giftcardId: e.target.value,
+                                        shop: next?.shop || row.shop || '',
+                                      }
+                                    : row
+                                )
+                              );
+                            }}
+                            className={selectClass}
+                          >
+                            <option value="">Giftcard</option>
+                            {giftcardOptions.map((g) => (
+                              <option key={g.id} value={g.id}>
+                                {g.shop}
+                                {g.balance > 0 ? ` — remaining ${formatAUD(g.balance)}` : ''}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            max={selected?.balance > 0 ? selected.balance : undefined}
+                            value={p.amount}
+                            onChange={(e) =>
+                              setGiftcardPayments((prev) =>
+                                prev.map((row, i) =>
+                                  i === index ? { ...row, amount: e.target.value } : row
+                                )
+                              )
+                            }
+                            className={inputClass}
+                            placeholder="0.00"
+                          />
+                          <button
+                            type="button"
+                            className="text-xs text-text-muted hover:text-expense px-2"
+                            onClick={() =>
+                              setGiftcardPayments((prev) => prev.filter((_, i) => i !== index))
+                            }
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                  <button
+                    type="button"
+                    className="text-sm text-accent hover:text-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
+                    disabled={giftcardOptions.length === 0}
+                    onClick={() =>
+                      setGiftcardPayments((prev) => [
+                        ...prev,
+                        { giftcardId: '', shop: '', amount: '' },
+                      ])
+                    }
+                  >
+                    + Add giftcard
+                  </button>
+                </div>
+              </Field>
+            )}
 
             {!hasReceipt && (
               <Field label="Amount (AUD)">
