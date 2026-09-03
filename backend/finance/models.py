@@ -208,12 +208,6 @@ class Transaction(AuditedModel):
     )
     date = models.DateField()
     change = models.DecimalField(max_digits=14, decimal_places=2)
-    source = models.ForeignKey(
-        Source,
-        on_delete=models.PROTECT,
-        related_name='transactions',
-        db_column='source_id',
-    )
     comment = models.TextField(blank=True, default='')
     category = models.ForeignKey(
         Category,
@@ -231,14 +225,6 @@ class Transaction(AuditedModel):
         related_name='transactions',
         db_column='receipt_id',
     )
-    giftcard = models.ForeignKey(
-        Giftcard,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='transactions',
-        db_column='giftcard_id',
-    )
 
     class Meta:
         db_table = 'transaction'
@@ -246,5 +232,77 @@ class Transaction(AuditedModel):
             models.UniqueConstraint(
                 fields=['user', 'row_number'],
                 name='transaction_user_row_number_uniq',
+            ),
+        ]
+
+
+class Payment(AuditedModel):
+    """Funding from a Source toward a Transaction."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='payments',
+        db_column='user_id',
+    )
+    transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.CASCADE,
+        related_name='payments',
+        db_column='transaction_id',
+    )
+    source = models.ForeignKey(
+        Source,
+        on_delete=models.PROTECT,
+        related_name='payments',
+        db_column='source_id',
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    row_number = models.PositiveIntegerField(
+        help_text='1-based Google Sheets row number in the Payment table.',
+    )
+
+    class Meta:
+        db_table = 'payment'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'row_number'],
+                name='payment_user_row_number_uniq',
+            ),
+        ]
+
+
+class GiftcardPayment(AuditedModel):
+    """Funding from a Giftcard toward a Transaction."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='giftcard_payments',
+        db_column='user_id',
+    )
+    transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.CASCADE,
+        related_name='giftcard_payments',
+        db_column='transaction_id',
+    )
+    giftcard = models.ForeignKey(
+        Giftcard,
+        on_delete=models.PROTECT,
+        related_name='giftcard_payments',
+        db_column='giftcard_id',
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    row_number = models.PositiveIntegerField(
+        help_text='1-based Google Sheets row number in the GiftcardPayment table.',
+    )
+
+    class Meta:
+        db_table = 'giftcard_payment'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'row_number'],
+                name='giftcard_payment_user_row_number_uniq',
             ),
         ]

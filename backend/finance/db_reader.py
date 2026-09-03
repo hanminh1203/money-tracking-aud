@@ -15,6 +15,8 @@ from finance.comment_parse import parse_store_comment
 from finance.models import (
     Category,
     Giftcard,
+    GiftcardPayment,
+    Payment,
     Product,
     ProductItem,
     Receipt,
@@ -28,11 +30,16 @@ TRANSACTION_HEADERS = [
     'Transaction ID',
     'Date',
     'Change',
-    'Source',
     'Comment',
     'Sub category',
     'Receipt ID',
+]
+PAYMENT_EXPORT_COLUMNS = ['Payment ID', 'Transaction ID', 'Source', 'Amount']
+GIFTCARD_PAYMENT_EXPORT_COLUMNS = [
+    'Giftcard Payment ID',
+    'Transaction ID',
     'Giftcard ID',
+    'Amount',
 ]
 
 CATEGORY_EXPORT_COLUMNS = ['Main Category', 'Sub category', 'Type']
@@ -74,36 +81,70 @@ def _dec_to_number(value: Decimal) -> float:
     return float(value)
 
 
+def _payment_payloads(tx: Transaction) -> list[dict]:
+    return [
+        {'source': p.source.name, 'amount': _dec_to_number(p.amount)}
+        for p in tx.payments.all()
+    ]
+
+
+def _giftcard_payment_payloads(tx: Transaction) -> list[dict]:
+    return [
+        {
+            'giftcardId': str(gp.giftcard_id),
+            'shop': gp.giftcard.shop if gp.giftcard_id else '',
+            'amount': _dec_to_number(gp.amount),
+        }
+        for gp in tx.giftcard_payments.all()
+    ]
+
+
+def _sources_summary(tx: Transaction) -> str:
+    parts = [p.source.name for p in tx.payments.all()]
+    parts.extend(
+        gp.giftcard.shop or 'Giftcard'
+        for gp in tx.giftcard_payments.all()
+        if gp.giftcard_id
+    )
+    return ' + '.join(parts)
+
+
 def _tx_row(tx: Transaction) -> dict:
+    summary = _sources_summary(tx)
     return {
         'id': str(tx.id),
         'Date': tx.date.isoformat(),
         'Change': _dec_to_number(tx.change),
-        'Source': tx.source.name if tx.source_id else '',
+        'Source': summary,
         'Comment': tx.comment,
         'Sub category': tx.category.sub_category if tx.category_id else '',
         'Receipt ID': str(tx.receipt_id) if tx.receipt_id else None,
-        'Giftcard ID': str(tx.giftcard_id) if tx.giftcard_id else None,
         'Creation Date': tx.creation_date.isoformat() if tx.creation_date else None,
         '__row': tx.row_number,
+        'payments': _payment_payloads(tx),
+        'giftcardPayments': _giftcard_payment_payloads(tx),
+        'sourcesSummary': summary,
     }
 
 
 def _dashboard_tx_row(tx: Transaction) -> dict:
     """Return a transaction already shaped for the dashboard UI."""
+    summary = _sources_summary(tx)
     return {
         'id': str(tx.id),
         'row': tx.row_number,
         'date': tx.date.isoformat(),
         'creationDate': tx.creation_date.isoformat() if tx.creation_date else None,
         'change': _dec_to_number(tx.change),
-        'source': tx.source.name,
+        'source': summary,
+        'sourcesSummary': summary,
+        'payments': _payment_payloads(tx),
+        'giftcardPayments': _giftcard_payment_payloads(tx),
         'comment': tx.comment,
         'subCategory': tx.category.sub_category if tx.category_id else '',
         'mainCategory': tx.category.main_category if tx.category_id else '',
         'type': tx.category.type if tx.category_id else '',
         'receiptId': str(tx.receipt_id) if tx.receipt_id else None,
-        'giftcardId': str(tx.giftcard_id) if tx.giftcard_id else None,
     }
 
 
@@ -146,15 +187,24 @@ def _shift_month(value: date, offset: int) -> date:
     return date(month_index // 12, month_index % 12 + 1, 1)
 
 
-def _base_queryset(*, user: User, source: str | None = None) -> QuerySet[Transaction]:
-    qs = (
+def _tx_queryset(*, user: User) -> QuerySet[Transaction]:
+    return (
         Transaction.objects.filter(user=user)
-        .select_related('source', 'category', 'receipt')
-        .order_by('-date', '-creation_date')
+        .select_related('category', 'receipt')
+        .prefetch_related(
+            'payments__source',
+            'giftcard_payments__giftcard',
+        )
     )
+
+
+def _base_queryset(*, user: User, source: str | None = None) -> QuerySet[Transaction]:
+    qs = _tx_queryset(user=user).order_by('-date', '-creation_date')
     name = (source or '').strip()
     if name:
-        qs = qs.filter(source__name=name)
+        qs = qs.filter(
+            Q(payments__source__name=name) | Q(giftcard_payments__giftcard__shop=name)
+        ).distinct()
     return qs
 
 
@@ -190,7 +240,7 @@ def get_transaction_data(
     headers = list(TRANSACTION_HEADERS)
 
     if page is None:
-        rows = [_tx_row(tx) for tx in qs.iterator()]
+        rows = [_tx_row(tx) for tx in qs.iterator(chunk_size=2000)]
         return {'headers': headers, 'rows': rows}
 
     page = max(1, int(page))
@@ -221,7 +271,7 @@ def get_dashboard_data(*, user: User) -> dict:
 
     zero = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
     user_txs = Transaction.objects.filter(user=user)
-    current_qs = user_txs.filter(
+    current_qs = _tx_queryset(user=user).filter(
         date__gte=current_month,
         date__lt=next_month,
     )
@@ -243,7 +293,11 @@ def get_dashboard_data(*, user: User) -> dict:
     )
     income = totals['income'] or Decimal('0')
     expense = totals['expense'] or Decimal('0')
-    net_worth = user_txs.aggregate(total=Sum('change'))['total'] or Decimal('0')
+    tx_total = user_txs.aggregate(total=Sum('change'))['total'] or Decimal('0')
+    giftcard_total = Giftcard.objects.filter(user=user).aggregate(
+        total=Sum('balance')
+    )['total'] or Decimal('0')
+    net_worth = tx_total + giftcard_total
 
     breakdown_rows = (
         user_txs.filter(
@@ -279,9 +333,7 @@ def get_dashboard_data(*, user: User) -> dict:
 
     transactions = [
         _dashboard_tx_row(tx)
-        for tx in current_qs.select_related('source', 'category', 'receipt').order_by(
-            '-date', '-creation_date'
-        )
+        for tx in current_qs.order_by('-date', '-creation_date')
     ]
 
     return {
@@ -309,7 +361,8 @@ def get_receipt(*, user: User, receipt_id: str) -> dict:
             Receipt.objects.filter(user=user)
             .prefetch_related(
                 'items',
-                'transactions__source',
+                'transactions__payments__source',
+                'transactions__giftcard_payments__giftcard',
                 'transactions__category',
             )
             .get(pk=rid)
@@ -324,12 +377,21 @@ def get_receipt(*, user: User, receipt_id: str) -> dict:
     comment = ''
     sub_category = ''
     for tx in receipt.transactions.all():
-        sources.append(
-            {
-                'source': tx.source.name if tx.source_id else '',
-                'amount': abs(_dec_to_number(tx.change)),
-            }
-        )
+        for payment in tx.payments.all():
+            sources.append(
+                {
+                    'source': payment.source.name if payment.source_id else '',
+                    'amount': _dec_to_number(payment.amount),
+                }
+            )
+        for gp in tx.giftcard_payments.all():
+            sources.append(
+                {
+                    'source': gp.giftcard.shop if gp.giftcard_id else 'Giftcard',
+                    'amount': _dec_to_number(gp.amount),
+                    'giftcardId': str(gp.giftcard_id),
+                }
+            )
         if not sub_category and tx.category_id:
             sub_category = (tx.category.sub_category or '').strip()
         if not store and not comment:
@@ -355,9 +417,8 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
 
     try:
         tx = (
-            Transaction.objects.filter(user=user)
-            .select_related('source', 'category', 'receipt')
-            .prefetch_related('receipt__items', 'receipt__transactions__source')
+            _tx_queryset(user=user)
+            .prefetch_related('receipt__items')
             .get(pk=tid)
         )
     except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
@@ -371,11 +432,18 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
             'total': _dec_to_number(tx.receipt.total),
             'sources': [
                 {
-                    'transactionId': str(linked.id),
-                    'source': linked.source.name if linked.source_id else '',
-                    'amount': abs(_dec_to_number(linked.change)),
+                    'source': payment.source.name if payment.source_id else '',
+                    'amount': _dec_to_number(payment.amount),
                 }
-                for linked in tx.receipt.transactions.all()
+                for payment in tx.payments.all()
+            ]
+            + [
+                {
+                    'source': gp.giftcard.shop if gp.giftcard_id else 'Giftcard',
+                    'amount': _dec_to_number(gp.amount),
+                    'giftcardId': str(gp.giftcard_id),
+                }
+                for gp in tx.giftcard_payments.all()
             ],
             'items': _receipt_items(tx.receipt, user=user),
         }
@@ -430,7 +498,8 @@ def _product_item_purchase_date(pi: ProductItem) -> date | None:
 def _product_item_label(pi: ProductItem) -> str:
     if pi.transaction_id and pi.transaction:
         store, comment = parse_store_comment(pi.transaction.comment or '')
-        parts = [p for p in (store, pi.transaction.source.name if pi.transaction.source_id else '', comment) if p]
+        summary = _sources_summary(pi.transaction)
+        parts = [p for p in (store, summary, comment) if p]
         return ' · '.join(parts) if parts else 'Transaction'
     if pi.receipt_item_id and pi.receipt_item:
         return pi.receipt_item.name
@@ -519,8 +588,12 @@ def get_product_detail(*, user: User, product_id: str) -> dict:
     items = list(
         ProductItem.objects.filter(user=user, product=product)
         .select_related(
-            'transaction__source',
+            'transaction',
             'receipt_item__receipt',
+        )
+        .prefetch_related(
+            'transaction__payments__source',
+            'transaction__giftcard_payments__giftcard',
         )
         .order_by('-transaction__date', '-receipt_item__receipt__date', '-creation_date')
     )
@@ -561,17 +634,16 @@ def search_link_candidates(
             .values_list('transaction_id', flat=True)
         )
         qs = (
-            Transaction.objects.filter(user=user)
+            _tx_queryset(user=user)
             .exclude(id__in=linked_ids)
-            .select_related('source', 'category')
             .order_by('-date', '-creation_date')
         )
         if query:
             qs = qs.filter(
                 Q(comment__icontains=query)
-                | Q(source__name__icontains=query)
+                | Q(payments__source__name__icontains=query)
                 | Q(category__sub_category__icontains=query)
-            )
+            ).distinct()
         total = qs.count()
         total_pages = max(1, (total + size - 1) // size) if total else 1
         if page > total_pages:
@@ -581,7 +653,7 @@ def search_link_candidates(
         for tx in qs[offset : offset + size]:
             store, comment = parse_store_comment(tx.comment or '')
             label = ' · '.join(
-                p for p in (store, tx.source.name if tx.source_id else '', comment) if p
+                p for p in (store, _sources_summary(tx), comment) if p
             )
             rows.append(
                 {
@@ -651,14 +723,37 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
             str(tx.id),
             tx.date.isoformat(),
             _dec_cell(tx.change),
-            tx.source.name if tx.source_id else '',
             tx.comment or '',
             tx.category.sub_category if tx.category_id else '',
             str(tx.receipt_id) if tx.receipt_id else '',
-            str(tx.giftcard_id) if tx.giftcard_id else '',
         ]
         for tx in Transaction.objects.filter(user=user)
-        .select_related('source', 'category')
+        .select_related('category')
+        .order_by('row_number')
+        .iterator()
+    ]
+
+    payments = [
+        [
+            str(p.id),
+            str(p.transaction_id),
+            p.source.name if p.source_id else '',
+            _dec_cell(p.amount),
+        ]
+        for p in Payment.objects.filter(user=user)
+        .select_related('source')
+        .order_by('row_number')
+        .iterator()
+    ]
+
+    giftcard_payments = [
+        [
+            str(gp.id),
+            str(gp.transaction_id),
+            str(gp.giftcard_id),
+            _dec_cell(gp.amount),
+        ]
+        for gp in GiftcardPayment.objects.filter(user=user)
         .order_by('row_number')
         .iterator()
     ]
@@ -725,6 +820,16 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
             'table_name': settings.TRANSACTIONS_TABLE,
             'columns': list(TRANSACTION_HEADERS),
             'rows': transactions,
+        },
+        'payment': {
+            'table_name': settings.PAYMENT_TABLE,
+            'columns': list(PAYMENT_EXPORT_COLUMNS),
+            'rows': payments,
+        },
+        'giftcard_payment': {
+            'table_name': settings.GIFTCARD_PAYMENT_TABLE,
+            'columns': list(GIFTCARD_PAYMENT_EXPORT_COLUMNS),
+            'rows': giftcard_payments,
         },
         'giftcards': {
             'table_name': settings.GIFTCARD_TABLE,

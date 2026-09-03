@@ -15,6 +15,8 @@ from finance.db_writer import _parse_date, receipt_item_id_for_row
 from finance.models import (
     Category,
     Giftcard,
+    GiftcardPayment,
+    Payment,
     Product,
     ProductItem,
     Receipt,
@@ -28,6 +30,8 @@ from finance.sheets_client import SheetsClient
 # Sync/compare only these user-owned tables (Category/Source are shared, not synced).
 MIRROR_TABLE_KEYS = (
     'transactions',
+    'payment',
+    'giftcard_payment',
     'receipt',
     'receipt_items',
     'giftcards',
@@ -114,21 +118,45 @@ def _tx_fp(
     transaction_id: uuid.UUID,
     d: date,
     change: Decimal,
-    source: str,
     comment: str,
     sub_category: str,
     receipt_id: uuid.UUID | None,
-    giftcard_id: uuid.UUID | None,
 ) -> tuple:
     return (
         str(transaction_id),
         d.isoformat(),
         _fp_dec(change),
-        str(source or '').strip(),
         str(comment or ''),
         str(sub_category or '').strip(),
         str(receipt_id) if receipt_id else '',
-        str(giftcard_id) if giftcard_id else '',
+    )
+
+
+def _payment_fp(
+    payment_id: uuid.UUID,
+    transaction_id: uuid.UUID,
+    source: str,
+    amount: Decimal,
+) -> tuple:
+    return (
+        str(payment_id),
+        str(transaction_id),
+        str(source or '').strip(),
+        _fp_dec(amount),
+    )
+
+
+def _giftcard_payment_fp(
+    giftcard_payment_id: uuid.UUID,
+    transaction_id: uuid.UUID,
+    giftcard_id: uuid.UUID,
+    amount: Decimal,
+) -> tuple:
+    return (
+        str(giftcard_payment_id),
+        str(transaction_id),
+        str(giftcard_id),
+        _fp_dec(amount),
     )
 
 
@@ -254,8 +282,34 @@ def _parse_giftcard_row(
 
 def _parse_tx_row(
     row: dict, index: int
-) -> tuple[uuid.UUID, int, date, Decimal, str, str, str, uuid.UUID | None, uuid.UUID | None]:
+) -> tuple[uuid.UUID, int, date, Decimal, str, str, uuid.UUID | None]:
     try:
+        transaction_id = _optional_uuid(_cell(row, 'Transaction ID'))
+        if transaction_id is None:
+            raise ValueError('Transaction ID is required')
+        sheet_row = row.get('__sheet_row')
+        if sheet_row is None:
+            raise ValueError('Sheet row number is required')
+        return (
+            transaction_id,
+            int(sheet_row),
+            _parse_date(_cell(row, 'Date')),
+            _sheet_dec(_cell(row, 'Change')),
+            str(_cell(row, 'Comment') or ''),
+            str(_cell(row, 'Sub category', 'Sub Category') or '').strip(),
+            _optional_uuid(_cell(row, 'Receipt ID')),
+        )
+    except ValueError as exc:
+        raise SyncError(f'Transaction row {index + 1}: {exc}') from exc
+
+
+def _parse_payment_row(
+    row: dict, index: int
+) -> tuple[uuid.UUID, int, uuid.UUID, str, Decimal]:
+    try:
+        payment_id = _optional_uuid(_cell(row, 'Payment ID'))
+        if payment_id is None:
+            raise ValueError('Payment ID is required')
         transaction_id = _optional_uuid(_cell(row, 'Transaction ID'))
         if transaction_id is None:
             raise ValueError('Transaction ID is required')
@@ -266,18 +320,41 @@ def _parse_tx_row(
         if sheet_row is None:
             raise ValueError('Sheet row number is required')
         return (
-            transaction_id,
+            payment_id,
             int(sheet_row),
-            _parse_date(_cell(row, 'Date')),
-            _sheet_dec(_cell(row, 'Change')),
+            transaction_id,
             source_name,
-            str(_cell(row, 'Comment') or ''),
-            str(_cell(row, 'Sub category', 'Sub Category') or '').strip(),
-            _optional_uuid(_cell(row, 'Receipt ID')),
-            _optional_uuid(_cell(row, 'Giftcard ID')),
+            _sheet_dec(_cell(row, 'Amount')),
         )
     except ValueError as exc:
-        raise SyncError(f'Transaction row {index + 1}: {exc}') from exc
+        raise SyncError(f'Payment row {index + 1}: {exc}') from exc
+
+
+def _parse_giftcard_payment_row(
+    row: dict, index: int
+) -> tuple[uuid.UUID, int, uuid.UUID, uuid.UUID, Decimal]:
+    try:
+        giftcard_payment_id = _optional_uuid(_cell(row, 'Giftcard Payment ID'))
+        if giftcard_payment_id is None:
+            raise ValueError('Giftcard Payment ID is required')
+        transaction_id = _optional_uuid(_cell(row, 'Transaction ID'))
+        if transaction_id is None:
+            raise ValueError('Transaction ID is required')
+        giftcard_id = _optional_uuid(_cell(row, 'Giftcard ID'))
+        if giftcard_id is None:
+            raise ValueError('Giftcard ID is required')
+        sheet_row = row.get('__sheet_row')
+        if sheet_row is None:
+            raise ValueError('Sheet row number is required')
+        return (
+            giftcard_payment_id,
+            int(sheet_row),
+            transaction_id,
+            giftcard_id,
+            _sheet_dec(_cell(row, 'Amount')),
+        )
+    except ValueError as exc:
+        raise SyncError(f'Giftcard payment row {index + 1}: {exc}') from exc
 
 
 def _parse_sheet_fingerprints(source: dict[str, list[dict]]) -> dict[str, list[tuple]]:
@@ -295,11 +372,9 @@ def _parse_sheet_fingerprints(source: dict[str, list[dict]]) -> dict[str, list[t
             transaction_id,
             d,
             change,
-            source_name,
             comment,
             sub_category,
             receipt_id,
-            giftcard_id,
         )
         for i, row in enumerate(source['transactions'])
         for (
@@ -307,12 +382,24 @@ def _parse_sheet_fingerprints(source: dict[str, list[dict]]) -> dict[str, list[t
             _row_number,
             d,
             change,
-            source_name,
             comment,
             sub_category,
             receipt_id,
-            giftcard_id,
         ) in [_parse_tx_row(row, i)]
+    ]
+    payments = [
+        _payment_fp(payment_id, transaction_id, source_name, amount)
+        for i, row in enumerate(source.get('payments', []))
+        for payment_id, _row_number, transaction_id, source_name, amount in [
+            _parse_payment_row(row, i)
+        ]
+    ]
+    giftcard_payments = [
+        _giftcard_payment_fp(giftcard_payment_id, transaction_id, giftcard_id, amount)
+        for i, row in enumerate(source.get('giftcard_payments', []))
+        for giftcard_payment_id, _row_number, transaction_id, giftcard_id, amount in [
+            _parse_giftcard_payment_row(row, i)
+        ]
     ]
     products = [
         _product_fp(*_parse_product_row(row, i)) for i, row in enumerate(source.get('products', []))
@@ -326,6 +413,8 @@ def _parse_sheet_fingerprints(source: dict[str, list[dict]]) -> dict[str, list[t
         'receipt_items': items,
         'giftcards': giftcards,
         'transactions': transactions,
+        'payment': payments,
+        'giftcard_payment': giftcard_payments,
         'products': products,
         'product_items': product_items,
     }
@@ -349,15 +438,21 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
             tx.id,
             tx.date,
             tx.change,
-            tx.source.name if tx.source_id else '',
             tx.comment,
             tx.category.sub_category if tx.category_id else '',
             tx.receipt_id,
-            tx.giftcard_id,
         )
         for tx in Transaction.objects.filter(user=user)
-        .select_related('source', 'category')
+        .select_related('category')
         .iterator()
+    ]
+    payments = [
+        _payment_fp(p.id, p.transaction_id, p.source.name if p.source_id else '', p.amount)
+        for p in Payment.objects.filter(user=user).select_related('source').iterator()
+    ]
+    giftcard_payments = [
+        _giftcard_payment_fp(gp.id, gp.transaction_id, gp.giftcard_id, gp.amount)
+        for gp in GiftcardPayment.objects.filter(user=user).iterator()
     ]
     products = [
         _product_fp(p.id, p.name) for p in Product.objects.filter(user=user).iterator()
@@ -377,6 +472,8 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
         'receipt_items': items,
         'giftcards': giftcards,
         'transactions': transactions,
+        'payment': payments,
+        'giftcard_payment': giftcard_payments,
         'products': products,
         'product_items': product_items,
     }
@@ -481,11 +578,9 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
             row_number,
             d,
             change,
-            source_name,
             comment,
             sub_category,
             receipt_id,
-            giftcard_id,
         ) = _parse_tx_row(row, i)
         if row_number in seen_tx_rows:
             raise SyncError(
@@ -497,11 +592,6 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
             )
         seen_tx_rows.add(row_number)
         seen_tx_ids.add(transaction_id)
-        if source_name not in source_by_name:
-            raise SyncError(
-                f'Transaction row {i + 1}: Source {source_name!r} not found '
-                f'(add it to Sources first)'
-            )
         category_id = None
         if sub_category:
             category_id = category_by_sub.get(sub_category)
@@ -514,10 +604,6 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
             raise SyncError(
                 f'Transaction row {i + 1}: Receipt ID {receipt_id} not found in Receipt table'
             )
-        if giftcard_id is not None and giftcard_id not in seen_giftcard_ids:
-            raise SyncError(
-                f'Transaction row {i + 1}: Giftcard ID {giftcard_id} not found in Giftcard table'
-            )
         tx_objs.append(
             Transaction(
                 id=transaction_id,
@@ -526,13 +612,101 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
                 row_number=row_number,
                 date=d,
                 change=change,
-                source_id=source_by_name[source_name],
                 comment=comment,
                 category_id=category_id,
                 receipt_id=receipt_id,
-                giftcard_id=giftcard_id,
             )
         )
+
+    payment_objs: list[Payment] = []
+    seen_payment_ids: set[uuid.UUID] = set()
+    seen_payment_rows: set[int] = set()
+    for i, row in enumerate(source.get('payments', [])):
+        payment_id, row_number, transaction_id, source_name, amount = _parse_payment_row(row, i)
+        if payment_id in seen_payment_ids:
+            raise SyncError(f'Payment row {i + 1}: duplicate Payment ID {payment_id}')
+        if row_number in seen_payment_rows:
+            raise SyncError(f'Payment row {i + 1}: duplicate sheet row_number {row_number}')
+        if transaction_id not in seen_tx_ids:
+            raise SyncError(
+                f'Payment row {i + 1}: Transaction ID {transaction_id} not found'
+            )
+        if source_name not in source_by_name:
+            raise SyncError(
+                f'Payment row {i + 1}: Source {source_name!r} not found '
+                f'(add it to Sources first)'
+            )
+        seen_payment_ids.add(payment_id)
+        seen_payment_rows.add(row_number)
+        payment_objs.append(
+            Payment(
+                id=payment_id,
+                version=1,
+                user=user,
+                transaction_id=transaction_id,
+                source_id=source_by_name[source_name],
+                amount=abs(amount),
+                row_number=row_number,
+            )
+        )
+
+    giftcard_payment_objs: list[GiftcardPayment] = []
+    seen_gcp_ids: set[uuid.UUID] = set()
+    seen_gcp_rows: set[int] = set()
+    for i, row in enumerate(source.get('giftcard_payments', [])):
+        (
+            giftcard_payment_id,
+            row_number,
+            transaction_id,
+            giftcard_id,
+            amount,
+        ) = _parse_giftcard_payment_row(row, i)
+        if giftcard_payment_id in seen_gcp_ids:
+            raise SyncError(
+                f'Giftcard payment row {i + 1}: duplicate Giftcard Payment ID {giftcard_payment_id}'
+            )
+        if row_number in seen_gcp_rows:
+            raise SyncError(
+                f'Giftcard payment row {i + 1}: duplicate sheet row_number {row_number}'
+            )
+        if transaction_id not in seen_tx_ids:
+            raise SyncError(
+                f'Giftcard payment row {i + 1}: Transaction ID {transaction_id} not found'
+            )
+        if giftcard_id not in seen_giftcard_ids:
+            raise SyncError(
+                f'Giftcard payment row {i + 1}: Giftcard ID {giftcard_id} not found'
+            )
+        seen_gcp_ids.add(giftcard_payment_id)
+        seen_gcp_rows.add(row_number)
+        giftcard_payment_objs.append(
+            GiftcardPayment(
+                id=giftcard_payment_id,
+                version=1,
+                user=user,
+                transaction_id=transaction_id,
+                giftcard_id=giftcard_id,
+                amount=abs(amount),
+                row_number=row_number,
+            )
+        )
+
+    funding_by_tx: dict[uuid.UUID, Decimal] = {}
+    for payment in payment_objs:
+        funding_by_tx[payment.transaction_id] = (
+            funding_by_tx.get(payment.transaction_id, Decimal('0')) + abs(payment.amount)
+        )
+    for gp in giftcard_payment_objs:
+        funding_by_tx[gp.transaction_id] = (
+            funding_by_tx.get(gp.transaction_id, Decimal('0')) + abs(gp.amount)
+        )
+    for tx in tx_objs:
+        expected = abs(tx.change)
+        actual = funding_by_tx.get(tx.id, Decimal('0'))
+        if abs(expected - actual) > Decimal('0.009'):
+            raise SyncError(
+                f'Transaction {tx.id}: funding ({actual}) must equal abs(change) ({expected})'
+            )
 
     product_objs: list[Product] = []
     seen_product_ids: set[uuid.UUID] = set()
@@ -585,6 +759,8 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
     with db_transaction.atomic():
         ProductItem.objects.filter(user=user).delete()
         Product.objects.filter(user=user).delete()
+        GiftcardPayment.objects.filter(user=user).delete()
+        Payment.objects.filter(user=user).delete()
         Transaction.objects.filter(user=user).delete()
         ReceiptItem.objects.filter(user=user).delete()
         Receipt.objects.filter(user=user).delete()
@@ -593,6 +769,8 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
         ReceiptItem.objects.bulk_create(item_objs)
         Giftcard.objects.bulk_create(giftcard_objs)
         Transaction.objects.bulk_create(tx_objs)
+        Payment.objects.bulk_create(payment_objs)
+        GiftcardPayment.objects.bulk_create(giftcard_payment_objs)
         Product.objects.bulk_create(product_objs)
         ProductItem.objects.bulk_create(product_item_objs)
 
@@ -600,6 +778,8 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
         'ok': True,
         'inserted': {
             'transactions': len(tx_objs),
+            'payment': len(payment_objs),
+            'giftcard_payment': len(giftcard_payment_objs),
             'receipt': len(receipt_objs),
             'receipt_items': len(item_objs),
             'giftcards': len(giftcard_objs),

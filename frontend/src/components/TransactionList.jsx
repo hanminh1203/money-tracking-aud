@@ -45,8 +45,8 @@ function MobileTransactionCards({ transactions, onViewReceipt }) {
               <p className="mt-1 text-sm text-text-primary leading-snug break-words">
                 {t.comment || '—'}
               </p>
-              {t.source ? (
-                <p className="mt-0.5 text-xs text-text-muted truncate">{t.source}</p>
+              {t.sourcesSummary || t.source ? (
+                <p className="mt-0.5 text-xs text-text-muted truncate">{t.sourcesSummary || t.source}</p>
               ) : null}
             </div>
             <div className="shrink-0 text-right space-y-1.5">
@@ -143,7 +143,7 @@ export default function TransactionList({
                     {t.subCategory || '—'}
                   </td>
                   <td className="py-2.5 pr-4 text-text-secondary hidden lg:table-cell whitespace-nowrap">
-                    {t.source}
+                    {t.sourcesSummary || t.source}
                   </td>
                   <td className={`py-2.5 pl-4 text-right font-medium tabular-money whitespace-nowrap ${amountClass(t)}`}>
                     {formatAUD(t.change)}

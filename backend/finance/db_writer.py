@@ -10,9 +10,12 @@ from typing import Any
 
 from django.db import transaction as db_transaction
 
+from finance.funding import validate_funding
 from finance.models import (
     Category,
     Giftcard,
+    GiftcardPayment,
+    Payment,
     Product,
     ProductItem,
     Receipt,
@@ -24,7 +27,6 @@ from finance.models import (
 
 logger = logging.getLogger(__name__)
 
-GIFTCARD_SOURCE_NAME = 'Giftcard'
 RECEIPT_ITEM_NAMESPACE = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
 
 
@@ -79,12 +81,10 @@ def _parse_date(value: Any) -> date:
     text = str(value or '').strip()
     if not text:
         raise ValueError('Date is required')
-    # ISO date or datetime (forms / API)
     try:
         return date.fromisoformat(text[:10])
     except ValueError:
         pass
-    # Google Sheet display format
     for fmt in ('%d/%m/%Y', '%d/%m/%y'):
         try:
             return datetime.strptime(text, fmt).date()
@@ -133,42 +133,119 @@ def _resolve_transaction_id(row: dict) -> uuid.UUID:
     return uuid.uuid4()
 
 
-def save_transactions(rows: list[dict], *, user: User) -> None:
-    """
-    Insert Transaction rows.
+def _resolve_payment_id(row: dict) -> uuid.UUID:
+    pid = row.get('payment_id') or row.get('id')
+    if pid:
+        return uuid.UUID(str(pid))
+    return uuid.uuid4()
 
-    Each row dict: date, change, source, row_number, transaction_id?, comment?, sub_category?,
-    receipt_id?, giftcard_id?
-    source / sub_category are sheet names resolved to Source / Category FKs.
-    row_number is the 1-based Google Sheets row for the Transactions table.
-    transaction_id becomes Transaction.id when provided (matches sheet Transaction ID).
-    """
-    if not rows:
-        return
-    owner = _require_user(user)
-    try:
-        objs = []
-        for row in rows:
-            receipt_id = row.get('receipt_id')
-            giftcard_id = row.get('giftcard_id')
-            objs.append(
-                Transaction(
-                    id=_resolve_transaction_id(row),
-                    version=1,
-                    user=owner,
-                    row_number=int(row['row_number']),
-                    date=_parse_date(row['date']),
-                    change=_dec(row['change']),
-                    source_id=_resolve_source_id(row.get('source') or ''),
-                    comment=str(row.get('comment') or ''),
-                    category_id=_resolve_category_id(row.get('sub_category') or ''),
-                    receipt_id=uuid.UUID(str(receipt_id)) if receipt_id else None,
-                    giftcard_id=uuid.UUID(str(giftcard_id)) if giftcard_id else None,
-                )
+
+def _resolve_giftcard_payment_id(row: dict) -> uuid.UUID:
+    gid = row.get('giftcard_payment_id') or row.get('id')
+    if gid:
+        return uuid.UUID(str(gid))
+    return uuid.uuid4()
+
+
+def _create_payments(
+    *,
+    owner: User,
+    transaction_id: uuid.UUID,
+    payments: list[dict],
+    giftcard_payments: list[dict],
+) -> None:
+    Payment.objects.bulk_create(
+        [
+            Payment(
+                id=_resolve_payment_id(row),
+                version=1,
+                user=owner,
+                transaction_id=transaction_id,
+                source_id=_resolve_source_id(row.get('source') or ''),
+                amount=abs(_dec(row['amount'])),
+                row_number=int(row['row_number']),
             )
-        Transaction.objects.bulk_create(objs)
+            for row in payments
+        ]
+    )
+    GiftcardPayment.objects.bulk_create(
+        [
+            GiftcardPayment(
+                id=_resolve_giftcard_payment_id(row),
+                version=1,
+                user=owner,
+                transaction_id=transaction_id,
+                giftcard_id=uuid.UUID(str(row['giftcard_id'])),
+                amount=abs(_dec(row['amount'])),
+                row_number=int(row['row_number']),
+            )
+            for row in giftcard_payments
+        ]
+    )
+
+
+def save_transaction_bundle(
+    *,
+    user: User,
+    date: Any,
+    change: Any,
+    row_number: int,
+    transaction_id: Any = None,
+    comment: str = '',
+    sub_category: str = '',
+    receipt_id: Any = None,
+    payments: list[dict] | None = None,
+    giftcard_payments: list[dict] | None = None,
+) -> None:
+    """Insert one Transaction with Payment and/or GiftcardPayment rows."""
+    owner = _require_user(user)
+    payment_rows = list(payments or [])
+    giftcard_rows = list(giftcard_payments or [])
+    signed_change = _dec(change)
+    validate_funding(signed_change, payment_rows, giftcard_rows)
+    tid = _resolve_transaction_id({'transaction_id': transaction_id})
+    try:
+        with db_transaction.atomic():
+            Transaction.objects.create(
+                id=tid,
+                version=1,
+                user=owner,
+                row_number=int(row_number),
+                date=_parse_date(date),
+                change=signed_change,
+                comment=str(comment or ''),
+                category_id=_resolve_category_id(sub_category or ''),
+                receipt_id=uuid.UUID(str(receipt_id)) if receipt_id else None,
+            )
+            _create_payments(
+                owner=owner,
+                transaction_id=tid,
+                payments=payment_rows,
+                giftcard_payments=giftcard_rows,
+            )
     except Exception:
-        logger.exception('Postgres dual-write failed for transaction(s)')
+        logger.exception('Postgres dual-write failed for transaction bundle %s', tid)
+
+
+def save_transactions(
+    rows: list[dict],
+    *,
+    user: User,
+) -> None:
+    """Insert multiple transaction bundles (e.g. transfers)."""
+    for row in rows:
+        save_transaction_bundle(
+            user=user,
+            date=row['date'],
+            change=row['change'],
+            row_number=int(row['row_number']),
+            transaction_id=row.get('transaction_id'),
+            comment=str(row.get('comment') or ''),
+            sub_category=str(row.get('sub_category') or ''),
+            receipt_id=row.get('receipt_id'),
+            payments=row.get('payments') or [],
+            giftcard_payments=row.get('giftcard_payments') or [],
+        )
 
 
 def save_transaction(
@@ -176,29 +253,32 @@ def save_transaction(
     user: User,
     date: Any,
     change: Any,
-    source: str,
     row_number: int,
     transaction_id: Any = None,
     comment: str = '',
     sub_category: str = '',
     receipt_id: Any = None,
-    giftcard_id: Any = None,
+    payments: list[dict] | None = None,
+    giftcard_payments: list[dict] | None = None,
+    source: str | None = None,
+    amount: Any = None,
 ) -> None:
-    save_transactions(
-        [
-            {
-                'transaction_id': transaction_id,
-                'date': date,
-                'change': change,
-                'source': source,
-                'row_number': row_number,
-                'comment': comment,
-                'sub_category': sub_category,
-                'receipt_id': receipt_id,
-                'giftcard_id': giftcard_id,
-            }
-        ],
+    """Backward-compatible wrapper when callers pass a single source."""
+    payment_rows = list(payments or [])
+    giftcard_rows = list(giftcard_payments or [])
+    if not payment_rows and not giftcard_rows and source:
+        payment_rows = [{'source': source, 'amount': abs(_dec(amount or change)), 'row_number': row_number}]
+    save_transaction_bundle(
         user=user,
+        date=date,
+        change=change,
+        row_number=row_number,
+        transaction_id=transaction_id,
+        comment=comment,
+        sub_category=sub_category,
+        receipt_id=receipt_id,
+        payments=payment_rows,
+        giftcard_payments=giftcard_rows,
     )
 
 
@@ -209,18 +289,16 @@ def save_receipt_bundle(
     date: Any,
     total: Any,
     items: list[dict],
-    transactions: list[dict],
+    transaction: dict,
+    payments: list[dict],
+    giftcard_payments: list[dict] | None = None,
 ) -> None:
-    """
-    Insert Receipt + ReceiptItems + linked Transactions in one DB transaction.
-
-    receipt_id must equal the sheet Receipt ID (becomes Receipt.id).
-    items: name, amount, unit, money
-    transactions: date, change, source, row_number, transaction_id?, comment?, sub_category?
-    """
+    """Insert Receipt + ReceiptItems + one linked Transaction with funding rows."""
     owner = _require_user(user)
     try:
         rid = uuid.UUID(str(receipt_id))
+        signed_total = -abs(_dec(total))
+        validate_funding(signed_total, payments, giftcard_payments)
         with db_transaction.atomic():
             Receipt.objects.create(
                 id=rid,
@@ -235,22 +313,23 @@ def save_receipt_bundle(
                     for it in items
                 ]
             )
-            Transaction.objects.bulk_create(
-                [
-                    Transaction(
-                        id=_resolve_transaction_id(tx),
-                        version=1,
-                        user=owner,
-                        row_number=int(tx['row_number']),
-                        date=_parse_date(tx.get('date', date)),
-                        change=_dec(tx['change']),
-                        source_id=_resolve_source_id(tx.get('source') or ''),
-                        comment=str(tx.get('comment') or ''),
-                        category_id=_resolve_category_id(tx.get('sub_category') or ''),
-                        receipt_id=rid,
-                    )
-                    for tx in transactions
-                ]
+            tid = _resolve_transaction_id(transaction)
+            Transaction.objects.create(
+                id=tid,
+                version=1,
+                user=owner,
+                row_number=int(transaction['row_number']),
+                date=_parse_date(transaction.get('date', date)),
+                change=signed_total,
+                comment=str(transaction.get('comment') or ''),
+                category_id=_resolve_category_id(transaction.get('sub_category') or ''),
+                receipt_id=rid,
+            )
+            _create_payments(
+                owner=owner,
+                transaction_id=tid,
+                payments=payments,
+                giftcard_payments=list(giftcard_payments or []),
             )
     except Exception:
         logger.exception('Postgres dual-write failed for receipt bundle %s', receipt_id)
@@ -264,9 +343,10 @@ def save_giftcard_purchase(
     date: Any,
     balance: Any,
     row_number: int,
-    transactions: list[dict],
+    transaction: dict,
+    payment: dict,
 ) -> None:
-    """Insert Giftcard + linked buy Transactions in one DB transaction."""
+    """Insert Giftcard + buy Transaction with one Payment."""
     owner = _require_user(user)
     try:
         gid = uuid.UUID(str(giftcard_id))
@@ -280,22 +360,24 @@ def save_giftcard_purchase(
                 date=_parse_date(date),
                 balance=_dec(balance),
             )
-            Transaction.objects.bulk_create(
-                [
-                    Transaction(
-                        id=_resolve_transaction_id(tx),
-                        version=1,
-                        user=owner,
-                        row_number=int(tx['row_number']),
-                        date=_parse_date(tx.get('date', date)),
-                        change=_dec(tx['change']),
-                        source_id=_resolve_source_id(tx.get('source') or ''),
-                        comment=str(tx.get('comment') or ''),
-                        category_id=_resolve_category_id(tx.get('sub_category') or ''),
-                        giftcard_id=gid,
-                    )
-                    for tx in transactions
-                ]
+            tid = _resolve_transaction_id(transaction)
+            signed_change = _dec(transaction['change'])
+            validate_funding(signed_change, [payment], [])
+            Transaction.objects.create(
+                id=tid,
+                version=1,
+                user=owner,
+                row_number=int(transaction['row_number']),
+                date=_parse_date(transaction.get('date', date)),
+                change=signed_change,
+                comment=str(transaction.get('comment') or ''),
+                category_id=_resolve_category_id(transaction.get('sub_category') or ''),
+            )
+            _create_payments(
+                owner=owner,
+                transaction_id=tid,
+                payments=[payment],
+                giftcard_payments=[],
             )
     except Exception:
         logger.exception('Postgres dual-write failed for giftcard purchase %s', giftcard_id)
@@ -312,28 +394,36 @@ def save_giftcard_use(
     sub_category: str,
     row_number: int,
     transaction_id: Any = None,
+    giftcard_payment: dict,
 ) -> None:
-    """Insert use Transaction and update Giftcard.balance in one DB transaction."""
+    """Insert use Transaction with GiftcardPayment and update Giftcard.balance."""
     owner = _require_user(user)
     try:
         gid = uuid.UUID(str(giftcard_id))
+        signed_change = _dec(change)
+        validate_funding(signed_change, [], [giftcard_payment])
         with db_transaction.atomic():
             updated = Giftcard.objects.filter(pk=gid, user=owner).update(
                 balance=_dec(new_balance)
             )
             if not updated:
                 raise ValueError(f'Giftcard {gid} not found')
+            tid = _resolve_transaction_id({'transaction_id': transaction_id})
             Transaction.objects.create(
-                id=_resolve_transaction_id({'transaction_id': transaction_id}),
+                id=tid,
                 version=1,
                 user=owner,
                 row_number=int(row_number),
                 date=_parse_date(date),
-                change=_dec(change),
-                source_id=_resolve_source_id(GIFTCARD_SOURCE_NAME),
+                change=signed_change,
                 comment=str(comment or ''),
                 category_id=_resolve_category_id(sub_category or ''),
-                giftcard_id=gid,
+            )
+            _create_payments(
+                owner=owner,
+                transaction_id=tid,
+                payments=[],
+                giftcard_payments=[giftcard_payment],
             )
     except Exception:
         logger.exception('Postgres dual-write failed for giftcard use %s', giftcard_id)
@@ -345,20 +435,23 @@ def update_transaction_detail(
     transaction: Transaction,
     date: Any,
     change: Any,
-    source: str,
     comment: str,
     sub_category: str,
+    payments: list[dict],
+    giftcard_payments: list[dict] | None = None,
     receipt_total: Any | None = None,
     items: list[dict] | None = None,
-    sibling_updates: list[Transaction] | None = None,
 ) -> None:
-    """Update a transaction (and linked receipt items) after Sheets writes succeed."""
+    """Update a transaction and replace funding rows after Sheets writes succeed."""
     owner = _require_user(user)
+    payment_rows = list(payments or [])
+    giftcard_rows = list(giftcard_payments or [])
+    signed_change = _dec(change)
+    validate_funding(signed_change, payment_rows, giftcard_rows)
     try:
         with db_transaction.atomic():
             transaction.date = _parse_date(date)
-            transaction.change = _dec(change)
-            transaction.source_id = _resolve_source_id(source)
+            transaction.change = signed_change
             transaction.comment = str(comment or '')
             transaction.category_id = _resolve_category_id(sub_category or '')
             transaction.version = (transaction.version or 1) + 1
@@ -366,19 +459,20 @@ def update_transaction_detail(
                 update_fields=[
                     'date',
                     'change',
-                    'source_id',
                     'comment',
                     'category_id',
                     'version',
                 ]
             )
 
-            for sibling in sibling_updates or []:
-                sibling.date = transaction.date
-                sibling.comment = transaction.comment
-                sibling.category_id = transaction.category_id
-                sibling.version = (sibling.version or 1) + 1
-                sibling.save(update_fields=['date', 'comment', 'category_id', 'version'])
+            Payment.objects.filter(transaction=transaction, user=owner).delete()
+            GiftcardPayment.objects.filter(transaction=transaction, user=owner).delete()
+            _create_payments(
+                owner=owner,
+                transaction_id=transaction.id,
+                payments=payment_rows,
+                giftcard_payments=giftcard_rows,
+            )
 
             if transaction.receipt_id:
                 receipt = Receipt.objects.select_for_update().get(
@@ -481,4 +575,3 @@ def delete_product_item(*, user: User, product_item_id: Any) -> None:
         ProductItem.objects.filter(pk=product_item_id, user=owner).delete()
     except Exception:
         logger.exception('Postgres dual-write failed for product item delete %s', product_item_id)
-

@@ -91,7 +91,7 @@ export default function Management() {
       const result = await syncManagement();
       const inserted = result?.inserted || {};
       setSyncMessage(
-        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards, ${inserted.products ?? 0} products, ${inserted.product_items ?? 0} product items.`
+        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.payment ?? 0} payments, ${inserted.giftcard_payment ?? 0} giftcard payments, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards, ${inserted.products ?? 0} products, ${inserted.product_items ?? 0} product items.`
       );
       await loadStatus({ force: true });
     } catch (err) {

@@ -43,7 +43,14 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
     setSubmitting(true);
     setStatus(null);
     try {
-      await addTransaction({ date, amount, type, source, subCategory, comment });
+      await addTransaction({
+        date,
+        amount,
+        type,
+        payments: [{ source, amount }],
+        subCategory,
+        comment,
+      });
       setStatus({ ok: true, msg: 'Transaction added.' });
       onSaved?.();
       if (shouldClose) {

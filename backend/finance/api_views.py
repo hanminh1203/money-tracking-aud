@@ -201,9 +201,11 @@ def transactions(request: HttpRequest) -> JsonResponse:
             date=body.get('date'),
             amount=body.get('amount'),
             type=body.get('type'),
-            source=body.get('source'),
+            source=body.get('source') or '',
             sub_category=body.get('subCategory') or '',
             comment=body.get('comment') or '',
+            payments=body.get('payments'),
+            giftcard_payments=body.get('giftcardPayments'),
         )
     except ValueError as exc:
         return json_error(str(exc))
@@ -230,10 +232,12 @@ def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
             date=body.get('date'),
             amount=body.get('amount'),
             type=body.get('type'),
-            source=body.get('source'),
+            source=body.get('source') or '',
             sub_category=body.get('subCategory') or '',
             comment=body.get('comment') or '',
             items=body.get('items'),
+            payments=body.get('payments'),
+            giftcard_payments=body.get('giftcardPayments'),
         )
     except ValueError as exc:
         return json_error(str(exc))

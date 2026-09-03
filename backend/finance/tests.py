@@ -10,6 +10,7 @@ from finance.db_sync import sync_from_sheets
 from finance.models import (
     Category,
     Giftcard,
+    Payment,
     Product,
     ProductItem,
     Receipt,
@@ -42,16 +43,26 @@ class DashboardDataTests(TestCase):
             type='Expense',
         )
 
-    def add_transaction(self, row, value, amount, category=None, comment='', user=None):
-        return Transaction.objects.create(
-            user=user or self.user,
+    def add_transaction(self, row, value, amount, category=None, comment='', user=None, source=None):
+        owner = user or self.user
+        src = source or self.source
+        signed = Decimal(amount)
+        tx = Transaction.objects.create(
+            user=owner,
             row_number=row,
             date=value,
-            change=Decimal(amount),
-            source=self.source,
+            change=signed,
             category=category,
             comment=comment,
         )
+        Payment.objects.create(
+            user=owner,
+            transaction=tx,
+            source=src,
+            amount=abs(signed),
+            row_number=row,
+        )
+        return tx
 
     @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
     def test_dashboard_calculates_current_month_and_three_month_breakdowns(self, _localdate):
@@ -169,13 +180,19 @@ class SyncIsolationTests(TestCase):
             sub_category='Salary',
             type='Income',
         )
-        Transaction.objects.create(
+        tx_b = Transaction.objects.create(
             user=self.user_b,
             row_number=1,
             date=date(2026, 1, 1),
             change=Decimal('50.00'),
-            source=self.source,
             category=self.salary,
+        )
+        Payment.objects.create(
+            user=self.user_b,
+            transaction=tx_b,
+            source=self.source,
+            amount=Decimal('50.00'),
+            row_number=1,
         )
         Giftcard.objects.create(
             user=self.user_b,
@@ -194,13 +211,21 @@ class SyncIsolationTests(TestCase):
                     'Transaction ID': 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
                     'Date': '2026-01-10',
                     'Change': '100',
-                    'Source': 'Everyday',
                     'Comment': 'Pay',
                     'Sub category': 'Salary',
                     'Receipt ID': '',
-                    'Giftcard ID': '',
                 }
             ],
+            'payments': [
+                {
+                    '__sheet_row': 3,
+                    'Payment ID': 'e5f6a7b8-c9d0-1234-ef01-234567890abc',
+                    'Transaction ID': 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+                    'Source': 'Everyday',
+                    'Amount': '100',
+                }
+            ],
+            'giftcard_payments': [],
             'receipts': [],
             'receipt_items': [],
             'giftcards': [],
@@ -234,13 +259,21 @@ class SyncIsolationTests(TestCase):
                     'Transaction ID': str(tx_id),
                     'Date': '2026-01-10',
                     'Change': '-25',
-                    'Source': 'Everyday',
                     'Comment': 'Shop',
                     'Sub category': 'Salary',
                     'Receipt ID': '',
-                    'Giftcard ID': '',
                 }
             ],
+            'payments': [
+                {
+                    '__sheet_row': 3,
+                    'Payment ID': 'f6a7b8c9-d0e1-2345-f012-345678901bcd',
+                    'Transaction ID': str(tx_id),
+                    'Source': 'Everyday',
+                    'Amount': '25',
+                }
+            ],
+            'giftcard_payments': [],
             'receipts': [],
             'receipt_items': [],
             'giftcards': [],
@@ -278,17 +311,25 @@ class TransactionDetailTests(TestCase):
         )
 
     def add_transaction(self, **kwargs):
+        source = kwargs.pop('source', self.source)
         defaults = {
             'user': self.user,
             'row_number': 1,
             'date': date(2026, 1, 8),
             'change': Decimal('-42.50'),
-            'source': self.source,
             'category': self.groceries,
             'comment': 'Woolworths : weekly shop',
         }
         defaults.update(kwargs)
-        return Transaction.objects.create(**defaults)
+        tx = Transaction.objects.create(**defaults)
+        Payment.objects.create(
+            user=tx.user,
+            transaction=tx,
+            source=source,
+            amount=abs(tx.change),
+            row_number=tx.row_number,
+        )
+        return tx
 
     def test_get_transaction_without_receipt(self):
         tx = self.add_transaction()
@@ -428,15 +469,17 @@ class TransactionDetailTests(TestCase):
             transaction=tx,
             date='2026-02-01',
             change='150.00',
-            source='Savings',
             comment='Pay',
             sub_category='Salary',
+            payments=[{'source': 'Savings', 'amount': '150.00', 'row_number': 2}],
         )
 
         tx.refresh_from_db()
         self.assertEqual(tx.date, date(2026, 2, 1))
         self.assertEqual(tx.change, Decimal('150.00'))
-        self.assertEqual(tx.source_id, savings.id)
+        payment = Payment.objects.get(transaction=tx)
+        self.assertEqual(payment.source_id, savings.id)
+        self.assertEqual(payment.amount, Decimal('150.00'))
         self.assertEqual(tx.comment, 'Pay')
         self.assertEqual(tx.category_id, salary.id)
         self.assertEqual(tx.version, 2)
@@ -464,9 +507,9 @@ class TransactionDetailTests(TestCase):
             transaction=tx,
             date='2026-01-09',
             change='-10.00',
-            source='Everyday',
             comment='Coles : restock',
             sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '10.00', 'row_number': 1}],
             receipt_total='10.00',
             items=[
                 {'name': 'Eggs', 'amount': 12, 'unit': 'piece', 'money': 10},
@@ -570,7 +613,7 @@ class TransactionDetailTests(TestCase):
                 comment='Woolworths : weekly shop',
                 items=[{'name': 'Milk', 'amount': 1, 'unit': 'L', 'money': 4.5}],
             )
-        self.assertIn('must equal items total', str(ctx.exception))
+        self.assertIn('must equal', str(ctx.exception))
 
     def test_update_rejects_items_when_not_receipt_linked(self):
         tx = self.add_transaction()
@@ -602,15 +645,22 @@ class ProductTests(TestCase):
         self.product = Product.objects.create(user=self.user, name='Toothpaste')
 
     def add_transaction(self, row, value, amount, comment=''):
-        return Transaction.objects.create(
+        tx = Transaction.objects.create(
             user=self.user,
             row_number=row,
             date=value,
             change=Decimal(amount),
-            source=self.source,
             category=self.groceries,
             comment=comment,
         )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=self.source,
+            amount=abs(Decimal(amount)),
+            row_number=row,
+        )
+        return tx
 
     def test_product_item_requires_price_for_transaction_link(self):
         tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')

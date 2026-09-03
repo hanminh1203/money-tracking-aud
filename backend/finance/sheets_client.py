@@ -19,21 +19,19 @@ INPUT_COLUMNS = [
     TRANSACTION_ID_COLUMN,
     'Date',
     'Change',
-    'Source',
     'Comment',
     'Sub category',
+]
+RECEIPT_TX_COLUMNS = INPUT_COLUMNS + ['Receipt ID']
+PAYMENT_COLUMNS = ['Payment ID', 'Transaction ID', 'Source', 'Amount']
+GIFTCARD_PAYMENT_COLUMNS = [
+    'Giftcard Payment ID',
+    'Transaction ID',
+    'Giftcard ID',
+    'Amount',
 ]
 RECEIPT_COLUMNS = ['Receipt ID', 'Date', 'Total']
 RECEIPT_ITEM_COLUMNS = ['Receipt Item ID', 'Receipt ID', 'Name', 'Amount', 'Unit', 'Money']
-RECEIPT_TX_COLUMNS = [
-    TRANSACTION_ID_COLUMN,
-    'Date',
-    'Change',
-    'Source',
-    'Comment',
-    'Sub category',
-    'Receipt ID',
-]
 GIFTCARD_COLUMNS = ['Giftcard ID', 'Shop', 'Date', 'Balance']
 PRODUCT_COLUMNS = ['Product ID', 'Name']
 PRODUCT_ITEM_COLUMNS = [
@@ -42,17 +40,6 @@ PRODUCT_ITEM_COLUMNS = [
     'Price',
     'Transaction ID',
     'Receipt Item ID',
-]
-# Giftcard ID sits after Receipt ID so columns stay contiguous in the sheet table.
-GIFTCARD_TX_COLUMNS = [
-    TRANSACTION_ID_COLUMN,
-    'Date',
-    'Change',
-    'Source',
-    'Comment',
-    'Sub category',
-    'Receipt ID',
-    'Giftcard ID',
 ]
 GIFTCARD_SOURCE_NAME = 'Giftcard'
 
@@ -79,6 +66,12 @@ EXPORT_COLUMN_FORMATS: dict[str, dict[str, dict[str, str]]] = {
     'products': {},
     'product_items': {
         'Price': EXPORT_AUD_CURRENCY,
+    },
+    'payment': {
+        'Amount': EXPORT_AUD_CURRENCY,
+    },
+    'giftcard_payment': {
+        'Amount': EXPORT_AUD_CURRENCY,
     },
 }
 
@@ -202,6 +195,8 @@ class SheetsClient:
         # Stable order matching Management UI.
         order = (
             'transactions',
+            'payment',
+            'giftcard_payment',
             'giftcards',
             'receipt',
             'receipt_items',
@@ -490,6 +485,8 @@ class SheetsClient:
         receipt_table = self.get_table(settings.RECEIPT_TABLE)
         items_table = self.get_table(settings.RECEIPT_ITEMS_TABLE)
         giftcard_table = self.get_table(settings.GIFTCARD_TABLE)
+        payment_table = self.get_table(settings.PAYMENT_TABLE)
+        giftcard_payment_table = self.get_table(settings.GIFTCARD_PAYMENT_TABLE)
         product_table = self.get_table(settings.PRODUCT_TABLE)
         product_items_table = self.get_table(settings.PRODUCT_ITEMS_TABLE)
         (
@@ -497,6 +494,8 @@ class SheetsClient:
             receipt_vals,
             item_vals,
             giftcard_vals,
+            payment_vals,
+            giftcard_payment_vals,
             product_vals,
             product_item_vals,
         ) = self.batch_get_values(
@@ -505,6 +504,8 @@ class SheetsClient:
                 self.data_range_a1(receipt_table),
                 self.data_range_a1(items_table),
                 self.data_range_a1(giftcard_table),
+                self.data_range_a1(payment_table),
+                self.data_range_a1(giftcard_payment_table),
                 self.data_range_a1(product_table),
                 self.data_range_a1(product_items_table),
             ]
@@ -514,6 +515,10 @@ class SheetsClient:
             'receipts': self._rows_as_dicts(receipt_table, receipt_vals),
             'receipt_items': self._rows_as_dicts(items_table, item_vals),
             'giftcards': self._rows_as_dicts(giftcard_table, giftcard_vals),
+            'payments': self._rows_as_dicts(payment_table, payment_vals),
+            'giftcard_payments': self._rows_as_dicts(
+                giftcard_payment_table, giftcard_payment_vals
+            ),
             'products': self._rows_as_dicts(product_table, product_vals),
             'product_items': self._rows_as_dicts(product_items_table, product_item_vals),
         }
@@ -700,15 +705,134 @@ class SheetsClient:
         row_numbers = self.append_rows(settings.TRANSACTIONS_TABLE, INPUT_COLUMNS, [values])
         return row_numbers[0]
 
+    def delete_funding_rows_for_transaction(self, transaction_id: str) -> None:
+        tid = str(transaction_id or '').strip()
+        if not tid:
+            return
+        for table_name in (settings.PAYMENT_TABLE, settings.GIFTCARD_PAYMENT_TABLE):
+            rows = self.find_matching_sheet_rows(
+                table_name,
+                match_column='Transaction ID',
+                match_value=tid,
+            )
+            if rows:
+                self.delete_table_rows_at(table_name, rows)
+
+    def append_funding_rows(
+        self,
+        *,
+        transaction_id: str,
+        payments: list[dict],
+        giftcard_payments: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        """Append payment rows; return rows annotated with ids and sheet row numbers."""
+        saved_payments: list[dict] = []
+        saved_giftcard_payments: list[dict] = []
+        if payments:
+            specs = [
+                (str(row.get('payment_id') or row.get('id') or uuid.uuid4()), row)
+                for row in payments
+            ]
+            row_numbers = self.append_rows(
+                settings.PAYMENT_TABLE,
+                PAYMENT_COLUMNS,
+                [
+                    [pid, transaction_id, row['source'], row['amount']]
+                    for pid, row in specs
+                ],
+            )
+            for i, (pid, row) in enumerate(specs):
+                saved_payments.append(
+                    {
+                        **row,
+                        'payment_id': pid,
+                        'row_number': row_numbers[i],
+                    }
+                )
+        if giftcard_payments:
+            specs = [
+                (
+                    str(row.get('giftcard_payment_id') or row.get('id') or uuid.uuid4()),
+                    row,
+                )
+                for row in giftcard_payments
+            ]
+            row_numbers = self.append_rows(
+                settings.GIFTCARD_PAYMENT_TABLE,
+                GIFTCARD_PAYMENT_COLUMNS,
+                [
+                    [gid, transaction_id, row['giftcard_id'], row['amount']]
+                    for gid, row in specs
+                ],
+            )
+            for i, (gid, row) in enumerate(specs):
+                saved_giftcard_payments.append(
+                    {
+                        **row,
+                        'giftcard_payment_id': gid,
+                        'row_number': row_numbers[i],
+                    }
+                )
+        return saved_payments, saved_giftcard_payments
+
+    @staticmethod
+    def _normalize_funding(
+        *,
+        amount: Any,
+        payments: list[dict] | None,
+        giftcard_payments: list[dict] | None,
+        source: str = '',
+    ) -> tuple[list[dict], list[dict]]:
+        payment_rows: list[dict] = []
+        giftcard_rows: list[dict] = []
+        for row in giftcard_payments or []:
+            giftcard_id = str(row.get('giftcardId') or row.get('giftcard_id') or '').strip()
+            try:
+                amt = abs(float(row.get('amount')))
+            except (TypeError, ValueError):
+                raise SheetsError('Invalid giftcard payment amount')
+            if not giftcard_id or not amt:
+                raise SheetsError('Invalid giftcard payment')
+            giftcard_rows.append({'giftcard_id': giftcard_id, 'amount': amt})
+        for row in payments or []:
+            giftcard_id = str(row.get('giftcardId') or row.get('giftcard_id') or '').strip()
+            try:
+                amt = abs(float(row.get('amount')))
+            except (TypeError, ValueError):
+                raise SheetsError('Invalid payment amount')
+            if giftcard_id:
+                if not amt:
+                    raise SheetsError('Invalid giftcard payment')
+                giftcard_rows.append({'giftcard_id': giftcard_id, 'amount': amt})
+                continue
+            pay_source = str(row.get('source') or '').strip()
+            if not pay_source or not amt:
+                raise SheetsError('Invalid payment')
+            if pay_source == GIFTCARD_SOURCE_NAME:
+                raise SheetsError('Use giftcardPayments for giftcard funding')
+            payment_rows.append({'source': pay_source, 'amount': amt})
+        if not payment_rows and not giftcard_rows:
+            pay_source = str(source or '').strip()
+            try:
+                amt = abs(float(amount))
+            except (TypeError, ValueError):
+                raise SheetsError('Invalid amount')
+            if not pay_source or not amt:
+                raise SheetsError('At least one payment is required')
+            payment_rows.append({'source': pay_source, 'amount': amt})
+        return payment_rows, giftcard_rows
+
     def add_transaction(
         self,
         *,
         date: str,
         amount: Any,
         type: str,
-        source: str,
+        source: str = '',
         sub_category: str = '',
         comment: str = '',
+        payments: list[dict] | None = None,
+        giftcard_payments: list[dict] | None = None,
     ) -> dict:
         try:
             abs_amt = abs(float(amount))
@@ -716,22 +840,39 @@ class SheetsClient:
             raise SheetsError('Invalid amount')
         if not abs_amt:
             raise SheetsError('Invalid amount')
-        if not source:
-            raise SheetsError('Source is required')
         signed = -abs_amt if type == 'Expense' else abs_amt
+        payment_rows, giftcard_rows = self._normalize_funding(
+            amount=abs_amt,
+            payments=payments,
+            giftcard_payments=giftcard_payments,
+            source=source,
+        )
+        from finance.funding import validate_funding
+
+        try:
+            validate_funding(signed, payment_rows, giftcard_rows)
+        except ValueError as exc:
+            raise SheetsError(str(exc)) from exc
+
         transaction_id = str(uuid.uuid4())
         row_number = self.append_transaction_row(
-            [transaction_id, date, signed, source, comment or '', sub_category or '']
+            [transaction_id, date, signed, comment or '', sub_category or '']
         )
-        db_writer.save_transaction(
+        saved_payments, saved_giftcard_payments = self.append_funding_rows(
+            transaction_id=transaction_id,
+            payments=payment_rows,
+            giftcard_payments=giftcard_rows,
+        )
+        db_writer.save_transaction_bundle(
             user=self.user,
             date=date,
             change=signed,
-            source=source,
             comment=comment or '',
             sub_category=sub_category or '',
             row_number=row_number,
             transaction_id=transaction_id,
+            payments=saved_payments,
+            giftcard_payments=saved_giftcard_payments,
         )
         return {'added': 1}
 
@@ -758,10 +899,20 @@ class SheetsClient:
         from_tx_id = str(uuid.uuid4())
         to_tx_id = str(uuid.uuid4())
         from_row = self.append_transaction_row(
-            [from_tx_id, date, -abs_amt, from_source, note, 'Exchange (self)']
+            [from_tx_id, date, -abs_amt, note, 'Exchange (self)']
         )
         to_row = self.append_transaction_row(
-            [to_tx_id, date, abs_amt, to_source, note, 'Exchange (self)']
+            [to_tx_id, date, abs_amt, note, 'Exchange (self)']
+        )
+        from_payments, _ = self.append_funding_rows(
+            transaction_id=from_tx_id,
+            payments=[{'source': from_source, 'amount': abs_amt}],
+            giftcard_payments=[],
+        )
+        to_payments, _ = self.append_funding_rows(
+            transaction_id=to_tx_id,
+            payments=[{'source': to_source, 'amount': abs_amt}],
+            giftcard_payments=[],
         )
         db_writer.save_transactions(
             [
@@ -769,19 +920,19 @@ class SheetsClient:
                     'transaction_id': from_tx_id,
                     'date': date,
                     'change': -abs_amt,
-                    'source': from_source,
                     'comment': note,
                     'sub_category': 'Exchange (self)',
                     'row_number': from_row,
+                    'payments': from_payments,
                 },
                 {
                     'transaction_id': to_tx_id,
                     'date': date,
                     'change': abs_amt,
-                    'source': to_source,
                     'comment': note,
                     'sub_category': 'Exchange (self)',
                     'row_number': to_row,
+                    'payments': to_payments,
                 },
             ],
             user=self.user,
@@ -840,16 +991,20 @@ class SheetsClient:
 
         normalized_sources = []
         for i, s in enumerate(sources):
+            giftcard_id = str(s.get('giftcardId') or s.get('giftcard_id') or '').strip()
             source = str(s.get('source') or '').strip()
             try:
                 amount = abs(float(s.get('amount')))
             except (TypeError, ValueError):
                 raise SheetsError(f'Source {i + 1}: invalid amount')
-            if not source:
-                raise SheetsError(f'Source {i + 1}: source is required')
             if not amount:
                 raise SheetsError(f'Source {i + 1}: invalid amount')
-            normalized_sources.append({'source': source, 'amount': amount})
+            if giftcard_id:
+                normalized_sources.append({'giftcard_id': giftcard_id, 'amount': amount})
+            else:
+                if not source:
+                    raise SheetsError(f'Source {i + 1}: source is required')
+                normalized_sources.append({'source': source, 'amount': amount})
 
         total = round(sum(it['money'] for it in normalized_items) * 100) / 100
         source_total = round(sum(s['amount'] for s in normalized_sources) * 100) / 100
@@ -860,6 +1015,11 @@ class SheetsClient:
 
         receipt_id = str(uuid.uuid4())
         comment_text = f'{(store or "").strip()} : {comment or ""}'.strip()
+        transaction_id = str(uuid.uuid4())
+        payment_rows = [s for s in normalized_sources if 'source' in s]
+        giftcard_rows = [
+            s for s in normalized_sources if 'giftcard_id' in s
+        ]
 
         self.append_rows(
             settings.RECEIPT_TABLE, RECEIPT_COLUMNS, [[receipt_id, date, total]]
@@ -872,24 +1032,13 @@ class SheetsClient:
                 for it in normalized_items
             ],
         )
-        tx_specs = [
-            (str(uuid.uuid4()), s) for s in normalized_sources
-        ]
-        tx_row_numbers = self.append_rows(
-            settings.TRANSACTIONS_TABLE,
-            RECEIPT_TX_COLUMNS,
-            [
-                [
-                    tx_id,
-                    date,
-                    -s['amount'],
-                    s['source'],
-                    comment_text,
-                    sub_category,
-                    receipt_id,
-                ]
-                for tx_id, s in tx_specs
-            ],
+        tx_row_number = self.append_transaction_row(
+            [transaction_id, date, -total, comment_text, sub_category, receipt_id]
+        )
+        saved_payments, saved_giftcard_payments = self.append_funding_rows(
+            transaction_id=transaction_id,
+            payments=payment_rows,
+            giftcard_payments=giftcard_rows,
         )
 
         db_writer.save_receipt_bundle(
@@ -898,25 +1047,22 @@ class SheetsClient:
             date=date,
             total=total,
             items=normalized_items,
-            transactions=[
-                {
-                    'transaction_id': tx_id,
-                    'date': date,
-                    'change': -s['amount'],
-                    'source': s['source'],
-                    'comment': comment_text,
-                    'sub_category': sub_category,
-                    'row_number': tx_row_numbers[i],
-                }
-                for i, (tx_id, s) in enumerate(tx_specs)
-            ],
+            transaction={
+                'transaction_id': transaction_id,
+                'date': date,
+                'comment': comment_text,
+                'sub_category': sub_category,
+                'row_number': tx_row_number,
+            },
+            payments=saved_payments,
+            giftcard_payments=saved_giftcard_payments,
         )
 
         return {
             'receiptId': receipt_id,
             'total': total,
             'items': len(normalized_items),
-            'transactions': len(normalized_sources),
+            'transactions': 1,
         }
 
     def update_transaction(
@@ -926,10 +1072,12 @@ class SheetsClient:
         date: str,
         amount: Any,
         type: str,
-        source: str,
+        source: str = '',
         sub_category: str = '',
         comment: str = '',
         items: list[dict] | None = None,
+        payments: list[dict] | None = None,
+        giftcard_payments: list[dict] | None = None,
     ) -> dict:
         from django.core.exceptions import ValidationError
         from finance.models import Transaction
@@ -939,9 +1087,6 @@ class SheetsClient:
             raise SheetsError('Transaction ID is required')
         if not date:
             raise SheetsError('Date is required')
-        payment_source = str(source or '').strip()
-        if not payment_source:
-            raise SheetsError('Source is required')
         try:
             abs_amt = abs(float(amount))
         except (TypeError, ValueError):
@@ -960,7 +1105,7 @@ class SheetsClient:
             tx = (
                 Transaction.objects.filter(user=self.user)
                 .select_related('receipt')
-                .prefetch_related('receipt__transactions')
+                .prefetch_related('payments__source', 'giftcard_payments__giftcard')
                 .get(pk=tid)
             )
         except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
@@ -968,7 +1113,6 @@ class SheetsClient:
 
         normalized_items = None
         total = None
-        siblings: list = []
         if tx.receipt_id:
             if items is None:
                 raise SheetsError('items are required for a receipt-linked transaction')
@@ -1004,15 +1148,48 @@ class SheetsClient:
             if not normalized_items:
                 raise SheetsError('At least one item is required')
             total = round(sum(it['money'] for it in normalized_items) * 100) / 100
-            siblings = [s for s in tx.receipt.transactions.all() if s.id != tx.id]
-            sibling_total = round(sum(abs(float(s.change)) for s in siblings) * 100) / 100
-            if abs(total - (abs_amt + sibling_total)) > 0.009:
-                raise SheetsError(
-                    f'Source amounts ({round((abs_amt + sibling_total) * 100) / 100}) '
-                    f'must equal items total ({total})'
-                )
+            signed = -total
+            abs_amt = total
         elif items:
             raise SheetsError('This transaction is not linked to a receipt')
+
+        if payments is None and giftcard_payments is None:
+            payment_rows = [
+                {'source': p.source.name, 'amount': abs(float(p.amount))}
+                for p in tx.payments.all()
+            ]
+            giftcard_rows = [
+                {
+                    'giftcard_id': str(gp.giftcard_id),
+                    'amount': abs(float(gp.amount)),
+                }
+                for gp in tx.giftcard_payments.all()
+            ]
+            if not payment_rows and not giftcard_rows and source:
+                payment_rows = [{'source': source, 'amount': abs_amt}]
+        else:
+            payment_rows, giftcard_rows = self._normalize_funding(
+                amount=abs_amt,
+                payments=payments,
+                giftcard_payments=giftcard_payments,
+                source=source,
+            )
+
+        from finance.funding import validate_funding
+
+        try:
+            validate_funding(signed, payment_rows, giftcard_rows)
+        except ValueError as exc:
+            raise SheetsError(str(exc)) from exc
+
+        if tx.receipt_id:
+            funding_total = round(
+                sum(s['amount'] for s in payment_rows + giftcard_rows) * 100
+            ) / 100
+            if abs(total - funding_total) > 0.009:
+                raise SheetsError(
+                    f'Payment amounts ({funding_total}) must equal items total ({total})'
+                )
 
         self.update_table_row_at(
             settings.TRANSACTIONS_TABLE,
@@ -1020,22 +1197,17 @@ class SheetsClient:
             values_by_column={
                 'Date': date,
                 'Change': signed,
-                'Source': payment_source,
                 'Comment': note,
                 'Sub category': category,
             },
         )
 
-        for sibling in siblings:
-            self.update_table_row_at(
-                settings.TRANSACTIONS_TABLE,
-                sheet_row=sibling.row_number,
-                values_by_column={
-                    'Date': date,
-                    'Comment': note,
-                    'Sub category': category,
-                },
-            )
+        self.delete_funding_rows_for_transaction(tid)
+        saved_payments, saved_giftcard_payments = self.append_funding_rows(
+            transaction_id=tid,
+            payments=payment_rows,
+            giftcard_payments=giftcard_rows,
+        )
 
         if tx.receipt_id:
             receipt_rows = self.find_matching_sheet_rows(
@@ -1100,12 +1272,12 @@ class SheetsClient:
             transaction=tx,
             date=date,
             change=signed,
-            source=payment_source,
             comment=note,
             sub_category=category,
+            payments=saved_payments,
+            giftcard_payments=saved_giftcard_payments,
             receipt_total=total,
             items=normalized_items,
-            sibling_updates=siblings,
         )
         return {
             'id': str(tx.id),
@@ -1149,32 +1321,15 @@ class SheetsClient:
             [[giftcard_id, shop_name, date, abs_amt]],
         )
         debit_tx_id = str(uuid.uuid4())
-        credit_tx_id = str(uuid.uuid4())
         tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
-            GIFTCARD_TX_COLUMNS,
-            [
-                [
-                    debit_tx_id,
-                    date,
-                    -abs_amt,
-                    payment_source,
-                    note,
-                    sub_category,
-                    '',
-                    giftcard_id,
-                ],
-                [
-                    credit_tx_id,
-                    date,
-                    abs_amt,
-                    GIFTCARD_SOURCE_NAME,
-                    note,
-                    sub_category,
-                    '',
-                    giftcard_id,
-                ],
-            ],
+            RECEIPT_TX_COLUMNS,
+            [[debit_tx_id, date, -abs_amt, note, sub_category, '']],
+        )
+        saved_payments, _ = self.append_funding_rows(
+            transaction_id=debit_tx_id,
+            payments=[{'source': payment_source, 'amount': abs_amt}],
+            giftcard_payments=[],
         )
 
         db_writer.save_giftcard_purchase(
@@ -1184,33 +1339,22 @@ class SheetsClient:
             date=date,
             balance=abs_amt,
             row_number=gc_row_numbers[0],
-            transactions=[
-                {
-                    'transaction_id': debit_tx_id,
-                    'date': date,
-                    'change': -abs_amt,
-                    'source': payment_source,
-                    'comment': note,
-                    'sub_category': sub_category,
-                    'row_number': tx_row_numbers[0],
-                },
-                {
-                    'transaction_id': credit_tx_id,
-                    'date': date,
-                    'change': abs_amt,
-                    'source': GIFTCARD_SOURCE_NAME,
-                    'comment': note,
-                    'sub_category': sub_category,
-                    'row_number': tx_row_numbers[1],
-                },
-            ],
+            transaction={
+                'transaction_id': debit_tx_id,
+                'date': date,
+                'change': -abs_amt,
+                'comment': note,
+                'sub_category': sub_category,
+                'row_number': tx_row_numbers[0],
+            },
+            payment=saved_payments[0],
         )
         return {
             'giftcardId': giftcard_id,
             'shop': shop_name,
             'date': date,
             'balance': abs_amt,
-            'transactions': 2,
+            'transactions': 1,
         }
 
     def use_giftcard(
@@ -1254,8 +1398,13 @@ class SheetsClient:
         transaction_id = str(uuid.uuid4())
         tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
-            GIFTCARD_TX_COLUMNS,
-            [[transaction_id, date, -abs_amt, GIFTCARD_SOURCE_NAME, note, category, '', gid]],
+            RECEIPT_TX_COLUMNS,
+            [[transaction_id, date, -abs_amt, note, category, '']],
+        )
+        _, saved_giftcard_payments = self.append_funding_rows(
+            transaction_id=transaction_id,
+            payments=[],
+            giftcard_payments=[{'giftcard_id': gid, 'amount': abs_amt}],
         )
         self.update_table_cell_at_row(
             settings.GIFTCARD_TABLE,
@@ -1274,6 +1423,7 @@ class SheetsClient:
             sub_category=category,
             row_number=tx_row_numbers[0],
             transaction_id=transaction_id,
+            giftcard_payment=saved_giftcard_payments[0],
         )
         return {
             'giftcardId': gid,

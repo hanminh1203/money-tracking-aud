@@ -99,6 +99,21 @@ export default function TransactionDetail({ onSaved }) {
   );
 }
 
+function initialPayments(data) {
+  const rows = (data.payments || []).map((p) => ({
+    source: p.source || '',
+    amount: p.amount == null ? '' : String(p.amount),
+  }));
+  if (!rows.length && !(data.giftcardPayments || []).length && data.source) {
+    const firstSource = String(data.source).split(' + ')[0] || '';
+    rows.push({
+      source: firstSource,
+      amount: data.change == null ? '' : String(Math.abs(Number(data.change))),
+    });
+  }
+  return rows.length ? rows : [{ source: '', amount: '' }];
+}
+
 function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   const hasReceipt = Boolean(data.receiptId && data.receipt);
   const [type, setType] = useState(
@@ -112,7 +127,13 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   const [amount, setAmount] = useState(
     data.change == null ? '' : String(Math.abs(Number(data.change)))
   );
-  const [source, setSource] = useState(data.source || '');
+  const [payments, setPayments] = useState(initialPayments(data));
+  const [giftcardPayments, setGiftcardPayments] = useState(
+    (data.giftcardPayments || []).map((gp) => ({
+      giftcardId: gp.giftcardId || '',
+      amount: gp.amount == null ? '' : String(gp.amount),
+    }))
+  );
   const [subCategory, setSubCategory] = useState(data.subCategory || '');
   const [comment, setComment] = useState(data.comment || '');
   const [items, setItems] = useState(
@@ -154,27 +175,27 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     [items]
   );
 
-  const siblingTotal = useMemo(
+  const paymentsTotal = useMemo(
     () =>
-      (data.receipt?.sources || [])
-        .filter((s) => s.transactionId !== data.id)
-        .reduce((sum, s) => sum + (Math.abs(Number(s.amount)) || 0), 0),
-    [data]
+      payments.reduce((sum, p) => sum + (Math.abs(Number(p.amount)) || 0), 0)
+      + giftcardPayments.reduce((sum, p) => sum + (Math.abs(Number(p.amount)) || 0), 0),
+    [payments, giftcardPayments]
   );
 
-  const sourcesMatch =
-    !hasReceipt ||
-    (itemsTotal > 0 && Math.abs(itemsTotal - (Math.abs(Number(amount)) || 0) - siblingTotal) < 0.009);
+  const effectiveAmount = hasReceipt ? itemsTotal : Math.abs(Number(amount)) || 0;
+
+  const fundingMatch =
+    effectiveAmount > 0 && Math.abs(effectiveAmount - paymentsTotal) < 0.009;
 
   const canSubmit =
     date &&
-    amount &&
-    Number(amount) > 0 &&
-    source &&
+    effectiveAmount > 0 &&
+    (payments.some((p) => p.source && Number(p.amount) > 0)
+      || giftcardPayments.some((p) => p.giftcardId && Number(p.amount) > 0)) &&
     subCategory &&
+    fundingMatch &&
     !submitting &&
-    (!hasReceipt ||
-      (items.some((it) => it.name.trim() && Number(it.money) > 0) && sourcesMatch));
+    (!hasReceipt || items.some((it) => it.name.trim() && Number(it.money) > 0));
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -184,11 +205,16 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     try {
       const payload = {
         date,
-        amount,
+        amount: hasReceipt ? itemsTotal : amount,
         type,
-        source,
         subCategory,
         comment,
+        payments: payments
+          .filter((p) => p.source && Number(p.amount) > 0)
+          .map((p) => ({ source: p.source, amount: Number(p.amount) })),
+        giftcardPayments: giftcardPayments
+          .filter((p) => p.giftcardId && Number(p.amount) > 0)
+          .map((p) => ({ giftcardId: p.giftcardId, amount: Number(p.amount) })),
       };
       if (hasReceipt) {
         payload.items = items
@@ -317,40 +343,80 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
               </select>
             </Field>
 
-            <Field label="Source">
-              <select
-                value={source}
-                onChange={(e) => setSource(e.target.value)}
-                className={selectClass}
-                required
-              >
-                <option value="" disabled>
-                  Select a source
-                </option>
-                {(source && !(metadata.sources || []).some((s) => s.name === source)
-                  ? [{ name: source }, ...(metadata.sources || [])]
-                  : metadata.sources || []
-                ).map((s) => (
-                  <option key={s.name} value={s.name}>
-                    {s.name}
-                  </option>
+            <Field label="Payments">
+              <div className="space-y-2">
+                {payments.map((p, index) => (
+                  <div key={index} className="grid grid-cols-[1fr_7rem_auto] gap-2 items-center">
+                    <select
+                      value={p.source}
+                      onChange={(e) =>
+                        setPayments((prev) =>
+                          prev.map((row, i) => (i === index ? { ...row, source: e.target.value } : row))
+                        )
+                      }
+                      className={selectClass}
+                    >
+                      <option value="">Source</option>
+                      {(metadata.sources || []).map((s) => (
+                        <option key={s.name} value={s.name}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={p.amount}
+                      onChange={(e) =>
+                        setPayments((prev) =>
+                          prev.map((row, i) => (i === index ? { ...row, amount: e.target.value } : row))
+                        )
+                      }
+                      className={inputClass}
+                      placeholder="0.00"
+                    />
+                    <button
+                      type="button"
+                      className="text-xs text-text-muted hover:text-expense px-2"
+                      onClick={() => setPayments((prev) => prev.filter((_, i) => i !== index))}
+                      disabled={payments.length === 1 && !giftcardPayments.length}
+                    >
+                      Remove
+                    </button>
+                  </div>
                 ))}
-              </select>
+                <button
+                  type="button"
+                  className="text-sm text-accent hover:text-accent-hover"
+                  onClick={() => setPayments((prev) => [...prev, { source: '', amount: '' }])}
+                >
+                  + Add payment
+                </button>
+              </div>
             </Field>
 
-            <Field label="Amount (AUD)">
-              <input
-                type="number"
-                inputMode="decimal"
-                step="0.01"
-                min="0"
-                placeholder="0.00"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                className={inputClass}
-                required
-              />
-            </Field>
+            {!hasReceipt && (
+              <Field label="Amount (AUD)">
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  placeholder="0.00"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className={inputClass}
+                  required
+                />
+              </Field>
+            )}
+
+            {hasReceipt && (
+              <p className="text-sm text-text-muted">
+                Total: {formatAUD(itemsTotal)} · Payments: {formatAUD(paymentsTotal)}
+              </p>
+            )}
 
             <Field label="Comment">
               <input
@@ -477,11 +543,14 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
         </div>
       </Card>
 
-      {hasReceipt && itemsTotal > 0 && !sourcesMatch && (
+      {hasReceipt && itemsTotal > 0 && !fundingMatch && (
         <p className="text-sm text-expense">
-          {siblingTotal > 0
-            ? `This payment (${formatAUD(Math.abs(Number(amount)) || 0)}) plus other receipt payments (${formatAUD(siblingTotal)}) must equal items total (${formatAUD(itemsTotal)}).`
-            : `Amount (${formatAUD(Math.abs(Number(amount)) || 0)}) must equal items total (${formatAUD(itemsTotal)}).`}
+          Payment total ({formatAUD(paymentsTotal)}) must equal items total ({formatAUD(itemsTotal)}).
+        </p>
+      )}
+      {!hasReceipt && effectiveAmount > 0 && !fundingMatch && (
+        <p className="text-sm text-expense">
+          Payment total ({formatAUD(paymentsTotal)}) must equal amount ({formatAUD(effectiveAmount)}).
         </p>
       )}
 
