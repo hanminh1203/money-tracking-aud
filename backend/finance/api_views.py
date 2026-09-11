@@ -424,6 +424,7 @@ def create_product_item(request: HttpRequest) -> JsonResponse:
             transaction_id=body.get('transactionId'),
             receipt_item_id=body.get('receiptItemId'),
             price=body.get('price'),
+            end_date=body.get('endDate'),
         )
     except ValueError as exc:
         return json_error(str(exc))
@@ -432,11 +433,25 @@ def create_product_item(request: HttpRequest) -> JsonResponse:
     return JsonResponse(result)
 
 
-@require_http_methods(['DELETE'])
+@require_http_methods(['PUT', 'DELETE'])
 @require_auth
-def delete_product_item(request: HttpRequest, product_item_id: str) -> JsonResponse:
+def product_item_detail(request: HttpRequest, product_item_id: str) -> JsonResponse:
+    client = sheets_for(request)
+    if request.method == 'PUT':
+        try:
+            body = parse_json(request)
+            result = client.update_product_item(
+                product_item_id=product_item_id,
+                end_date=body.get('endDate'),
+            )
+        except ValueError as exc:
+            return json_error(str(exc))
+        except SheetsError as exc:
+            return json_error(str(exc), status=exc.status or 400)
+        return JsonResponse(result)
+
     try:
-        result = sheets_for(request).delete_product_item(product_item_id=product_item_id)
+        result = client.delete_product_item(product_item_id=product_item_id)
     except SheetsError as exc:
         return json_error(str(exc), status=exc.status or 400)
     return JsonResponse(result)

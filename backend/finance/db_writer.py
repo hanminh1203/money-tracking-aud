@@ -93,6 +93,18 @@ def _parse_date(value: Any) -> date:
     raise ValueError(f'Invalid date: {value!r}')
 
 
+def _optional_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if not str(value).strip():
+        return None
+    return _parse_date(value)
+
+
 def _dec(value: Any) -> Decimal:
     try:
         return Decimal(str(value))
@@ -454,6 +466,7 @@ def save_product_item(
     price: Any | None = None,
     transaction_id: Any | None = None,
     receipt_item_id: Any | None = None,
+    end_date: Any | None = None,
 ) -> None:
     owner = _require_user(user)
     try:
@@ -469,9 +482,29 @@ def save_product_item(
             transaction_id=tx_id,
             receipt_item_id=ri_id,
             price=_dec(price) if price is not None else None,
+            end_date=_optional_date(end_date),
         )
     except Exception:
         logger.exception('Postgres dual-write failed for product item %s', product_item_id)
+        raise
+
+
+def update_product_item(
+    *,
+    user: User,
+    product_item_id: Any,
+    end_date: Any | None = None,
+) -> None:
+    owner = _require_user(user)
+    try:
+        item = ProductItem.objects.get(pk=product_item_id, user=owner)
+        item.end_date = _optional_date(end_date)
+        item.version = (item.version or 1) + 1
+        item.save(update_fields=['end_date', 'version'])
+    except ProductItem.DoesNotExist as exc:
+        raise ValueError(f'Product item {product_item_id} not found') from exc
+    except Exception:
+        logger.exception('Postgres dual-write failed for product item update %s', product_item_id)
         raise
 
 

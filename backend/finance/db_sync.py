@@ -11,7 +11,7 @@ from typing import Any
 from django.db import transaction as db_transaction
 from django.utils import timezone
 
-from finance.db_writer import _parse_date, receipt_item_id_for_row
+from finance.db_writer import _optional_date, _parse_date, receipt_item_id_for_row
 from finance.models import (
     Category,
     Giftcard,
@@ -182,6 +182,7 @@ def _product_item_fp(
     price: Decimal | None,
     transaction_id: uuid.UUID | None,
     receipt_item_id: uuid.UUID | None,
+    end_date: date | None,
 ) -> tuple:
     return (
         str(product_item_id),
@@ -189,6 +190,7 @@ def _product_item_fp(
         _fp_dec(price) if price is not None else '',
         str(transaction_id) if transaction_id else '',
         str(receipt_item_id) if receipt_item_id else '',
+        end_date.isoformat() if end_date else '',
     )
 
 
@@ -207,7 +209,9 @@ def _parse_product_row(row: dict, index: int) -> tuple[uuid.UUID, str]:
 
 def _parse_product_item_row(
     row: dict, index: int
-) -> tuple[uuid.UUID, uuid.UUID, Decimal | None, uuid.UUID | None, uuid.UUID | None]:
+) -> tuple[
+    uuid.UUID, uuid.UUID, Decimal | None, uuid.UUID | None, uuid.UUID | None, date | None
+]:
     try:
         pi_id = _optional_uuid(_cell(row, 'Product Item ID'))
         if pi_id is None:
@@ -223,7 +227,8 @@ def _parse_product_item_row(
             raise ValueError('Exactly one of Transaction ID or Receipt Item ID is required')
         if transaction_id is not None and price is None:
             raise ValueError('Price is required when Transaction ID is set')
-        return pi_id, product_id, price, transaction_id, receipt_item_id
+        end_date = _optional_date(_cell(row, 'End Date', 'end_date'))
+        return pi_id, product_id, price, transaction_id, receipt_item_id, end_date
     except ValueError as exc:
         raise SyncError(f'Product item row {index + 1}: {exc}') from exc
 
@@ -369,6 +374,7 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
             pi.price,
             pi.transaction_id,
             pi.receipt_item_id,
+            pi.end_date,
         )
         for pi in ProductItem.objects.filter(user=user).iterator()
     ]
@@ -549,8 +555,8 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
     product_item_objs: list[ProductItem] = []
     seen_product_item_ids: set[uuid.UUID] = set()
     for i, row in enumerate(source.get('product_items', [])):
-        pi_id, product_id, price, sheet_tx_id, receipt_item_id = _parse_product_item_row(
-            row, i
+        pi_id, product_id, price, sheet_tx_id, receipt_item_id, end_date = (
+            _parse_product_item_row(row, i)
         )
         if pi_id in seen_product_item_ids:
             raise SyncError(f'Product item row {i + 1}: duplicate Product Item ID {pi_id}')
@@ -579,6 +585,7 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
                 transaction_id=transaction_id,
                 receipt_item_id=receipt_item_id,
                 price=price,
+                end_date=end_date,
             )
         )
 

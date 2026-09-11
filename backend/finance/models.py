@@ -132,7 +132,10 @@ class Product(AuditedModel):
 
 
 class ProductItem(AuditedModel):
-    """Mirrors Sheets Product_Items; links a product to a transaction or receipt item."""
+    """Mirrors Sheets Product_Items; links a product to a transaction or receipt item.
+
+    end_date is when the purchase is expected to run out (optional).
+    """
 
     user = models.ForeignKey(
         User,
@@ -163,6 +166,7 @@ class ProductItem(AuditedModel):
         db_column='receipt_item_id',
     )
     price = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
 
     class Meta:
         db_table = 'product_item'

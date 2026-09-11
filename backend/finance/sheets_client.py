@@ -42,6 +42,7 @@ PRODUCT_ITEM_COLUMNS = [
     'Price',
     'Transaction ID',
     'Receipt Item ID',
+    'End Date',
 ]
 # Giftcard ID sits after Receipt ID so columns stay contiguous in the sheet table.
 GIFTCARD_TX_COLUMNS = [
@@ -79,6 +80,7 @@ EXPORT_COLUMN_FORMATS: dict[str, dict[str, dict[str, str]]] = {
     'products': {},
     'product_items': {
         'Price': EXPORT_AUD_CURRENCY,
+        'End Date': EXPORT_AU_DATE,
     },
 }
 
@@ -1356,6 +1358,7 @@ class SheetsClient:
         transaction_id: str | None = None,
         receipt_item_id: str | None = None,
         price: Any = None,
+        end_date: Any = None,
     ) -> dict:
         from finance.models import Product, ReceiptItem, Transaction
 
@@ -1399,11 +1402,17 @@ class SheetsClient:
                 except (TypeError, ValueError):
                     raise SheetsError('Invalid price')
 
+        try:
+            parsed_end = db_writer._optional_date(end_date)
+        except ValueError as exc:
+            raise SheetsError(str(exc)) from exc
+        sheet_end = parsed_end.isoformat() if parsed_end else ''
+
         product_item_id = str(uuid.uuid4())
         self.append_rows(
             settings.PRODUCT_ITEMS_TABLE,
             PRODUCT_ITEM_COLUMNS,
-            [[product_item_id, pid, sheet_price, tx_sheet_value, ri_id or '']],
+            [[product_item_id, pid, sheet_price, tx_sheet_value, ri_id or '', sheet_end]],
         )
         db_writer.save_product_item(
             user=self.user,
@@ -1412,6 +1421,7 @@ class SheetsClient:
             price=sheet_price if sheet_price != '' else None,
             transaction_id=tx_id,
             receipt_item_id=ri_id,
+            end_date=parsed_end,
         )
         return {
             'productItemId': product_item_id,
@@ -1419,6 +1429,46 @@ class SheetsClient:
             'transactionId': tx_id,
             'receiptItemId': ri_id,
             'price': sheet_price if sheet_price != '' else None,
+            'endDate': sheet_end or None,
+        }
+
+    def update_product_item(self, *, product_item_id: str, end_date: Any = None) -> dict:
+        from finance.models import ProductItem
+
+        pi_id = str(product_item_id or '').strip()
+        if not pi_id:
+            raise SheetsError('Product Item ID is required')
+        try:
+            ProductItem.objects.get(pk=pi_id, user=self.user)
+        except (ProductItem.DoesNotExist, ValueError) as exc:
+            raise SheetsError('Product item not found', status=404) from exc
+
+        try:
+            parsed_end = db_writer._optional_date(end_date)
+        except ValueError as exc:
+            raise SheetsError(str(exc)) from exc
+        sheet_end = parsed_end.isoformat() if parsed_end else ''
+
+        rows = self.find_matching_sheet_rows(
+            settings.PRODUCT_ITEMS_TABLE,
+            match_column='Product Item ID',
+            match_value=pi_id,
+        )
+        if not rows:
+            raise SheetsError('Product item not found in spreadsheet', status=404)
+        self.update_table_row_at(
+            settings.PRODUCT_ITEMS_TABLE,
+            sheet_row=rows[0],
+            values_by_column={'End Date': sheet_end},
+        )
+        db_writer.update_product_item(
+            user=self.user,
+            product_item_id=pi_id,
+            end_date=parsed_end,
+        )
+        return {
+            'productItemId': pi_id,
+            'endDate': sheet_end or None,
         }
 
     def delete_product_item(self, *, product_item_id: str) -> dict:
