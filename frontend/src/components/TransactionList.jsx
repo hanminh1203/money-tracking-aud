@@ -1,6 +1,4 @@
-import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import ReceiptView from './ReceiptView';
 import { formatAUD, formatDateShort } from '../lib/transform';
 
 const viewBtnClass =
@@ -28,7 +26,7 @@ function DetailsLink({ transaction }) {
   );
 }
 
-function MobileTransactionCards({ transactions, onViewReceipt }) {
+function MobileTransactionCards({ transactions }) {
   return (
     <ul className="space-y-2 sm:hidden">
       {transactions.map((t, i) => (
@@ -45,26 +43,12 @@ function MobileTransactionCards({ transactions, onViewReceipt }) {
               <p className="mt-1 text-sm text-text-primary leading-snug break-words">
                 {t.comment || '—'}
               </p>
-              {t.source ? (
-                <p className="mt-0.5 text-xs text-text-muted truncate">{t.source}</p>
-              ) : null}
             </div>
             <div className="shrink-0 text-right space-y-1.5">
               <div className={`text-sm font-medium tabular-money ${amountClass(t)}`}>
                 {formatAUD(t.change)}
               </div>
-              <div className="flex flex-col items-end gap-1.5">
-                <DetailsLink transaction={t} />
-                {t.receiptId ? (
-                  <button
-                    type="button"
-                    className={viewBtnClass}
-                    onClick={() => onViewReceipt(t.receiptId)}
-                  >
-                    Receipt
-                  </button>
-                ) : null}
-              </div>
+              <DetailsLink transaction={t} />
             </div>
           </div>
         </li>
@@ -83,8 +67,6 @@ export default function TransactionList({
   onPageChange,
   loading = false,
 }) {
-  const [viewReceiptId, setViewReceiptId] = useState(null);
-
   const paginated = Number.isFinite(pageSize) && pageSize > 0 && total != null;
   const safePage = paginated ? Math.min(Math.max(1, page || 1), Math.max(1, totalPages || 1)) : 1;
   const pages = paginated ? Math.max(1, totalPages || 1) : 1;
@@ -99,10 +81,7 @@ export default function TransactionList({
   return (
     <>
       <div className={loading ? 'opacity-60' : undefined}>
-        <MobileTransactionCards
-          transactions={transactions}
-          onViewReceipt={setViewReceiptId}
-        />
+        <MobileTransactionCards transactions={transactions} />
 
         <div className="hidden sm:block overflow-x-auto scrollbar-thin">
           <table className="w-full text-sm">
@@ -113,14 +92,8 @@ export default function TransactionList({
                 <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-[0.05em] hidden md:table-cell">
                   Category
                 </th>
-                <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-[0.05em] hidden lg:table-cell">
-                  Source
-                </th>
                 <th className="py-2 pl-4 text-xs font-semibold uppercase tracking-[0.05em] text-right">
                   Amount
-                </th>
-                <th className="py-2 pl-4 text-xs font-semibold uppercase tracking-[0.05em] text-right">
-                  Receipt
                 </th>
                 <th className="py-2 pl-4 text-xs font-semibold uppercase tracking-[0.05em] text-right">
                   Details
@@ -142,22 +115,8 @@ export default function TransactionList({
                   <td className="py-2.5 pr-4 text-text-secondary hidden md:table-cell whitespace-nowrap">
                     {t.subCategory || '—'}
                   </td>
-                  <td className="py-2.5 pr-4 text-text-secondary hidden lg:table-cell whitespace-nowrap">
-                    {t.source}
-                  </td>
                   <td className={`py-2.5 pl-4 text-right font-medium tabular-money whitespace-nowrap ${amountClass(t)}`}>
                     {formatAUD(t.change)}
-                  </td>
-                  <td className="py-2.5 pl-4 text-right whitespace-nowrap">
-                    {t.receiptId ? (
-                      <button
-                        type="button"
-                        className={viewBtnClass}
-                        onClick={() => setViewReceiptId(t.receiptId)}
-                      >
-                        View
-                      </button>
-                    ) : null}
                   </td>
                   <td className="py-2.5 pl-4 text-right whitespace-nowrap">
                     <DetailsLink transaction={t} />
@@ -196,10 +155,6 @@ export default function TransactionList({
             </button>
           </div>
         </div>
-      )}
-
-      {viewReceiptId && (
-        <ReceiptView receiptId={viewReceiptId} onClose={() => setViewReceiptId(null)} />
       )}
     </>
   );

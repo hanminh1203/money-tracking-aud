@@ -1,6 +1,6 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Field, inputClass, selectClass } from './FormField';
-import { addReceipt, extractReceiptFromImage } from '../lib/api';
+import { addReceipt, extractReceiptFromImage, getGiftcards } from '../lib/api';
 import { fileToDataUrl } from '../lib/imageUtils';
 import { formatAUD } from '../lib/transform';
 
@@ -8,6 +8,7 @@ const UNITS = ['kg', 'g', 'ml', 'l', 'piece'];
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const emptySource = () => ({ source: '', amount: '' });
+const emptyGiftcardPayment = () => ({ giftcardId: '', amount: '' });
 const emptyItem = () => ({ name: '', amount: '', unit: 'piece', money: '' });
 
 const cancelClass = 'btn-secondary';
@@ -20,6 +21,8 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
   const [subCategory, setSubCategory] = useState('');
   const [comment, setComment] = useState('');
   const [sources, setSources] = useState([emptySource()]);
+  const [giftcardPayments, setGiftcardPayments] = useState([]);
+  const [giftcards, setGiftcards] = useState([]);
   const [items, setItems] = useState([emptyItem()]);
   const [submitting, setSubmitting] = useState(false);
   const [extracting, setExtracting] = useState(false);
@@ -33,6 +36,11 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
     [metadata.categories]
   );
 
+  const paymentSources = useMemo(
+    () => (metadata.sources || []).filter((s) => s.name !== 'Giftcard'),
+    [metadata.sources]
+  );
+
   const itemsTotal = useMemo(
     () => items.reduce((sum, it) => sum + (Math.abs(Number(it.money)) || 0), 0),
     [items]
@@ -43,21 +51,85 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
     [sources]
   );
 
+  const giftcardTotal = useMemo(
+    () => giftcardPayments.reduce((sum, p) => sum + (Math.abs(Number(p.amount)) || 0), 0),
+    [giftcardPayments]
+  );
+
+  const fundingTotal = sourcesTotal + giftcardTotal;
+
   const sourcesMatch =
-    itemsTotal > 0 && Math.abs(itemsTotal - sourcesTotal) < 0.009;
+    itemsTotal > 0 && Math.abs(itemsTotal - fundingTotal) < 0.009;
+
+  const giftcardBalanceById = useMemo(() => {
+    const map = new Map();
+    for (const g of giftcards) {
+      map.set(String(g.id), Number(g.balance) || 0);
+    }
+    return map;
+  }, [giftcards]);
+
+  const giftcardOverBalance = useMemo(() => {
+    const used = new Map();
+    for (const row of giftcardPayments) {
+      if (!row.giftcardId) continue;
+      const amt = Math.abs(Number(row.amount)) || 0;
+      if (!amt) continue;
+      used.set(row.giftcardId, (used.get(row.giftcardId) || 0) + amt);
+    }
+    for (const [id, total] of used) {
+      const balance = giftcardBalanceById.get(String(id)) || 0;
+      if (total > balance + 0.009) {
+        const card = giftcards.find((g) => String(g.id) === String(id));
+        return {
+          id,
+          total,
+          balance,
+          label: card ? card.shop : id,
+        };
+      }
+    }
+    return null;
+  }, [giftcardPayments, giftcardBalanceById, giftcards]);
+
+  const hasFunding =
+    sources.some((s) => s.source && Number(s.amount) > 0) ||
+    giftcardPayments.some((p) => p.giftcardId && Number(p.amount) > 0);
 
   const canSubmit =
     store.trim() &&
     date &&
     subCategory &&
     items.some((it) => it.name.trim() && Number(it.money) > 0) &&
-    sources.some((s) => s.source && Number(s.amount) > 0) &&
+    hasFunding &&
     sourcesMatch &&
+    !giftcardOverBalance &&
     !submitting &&
     !extracting;
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await getGiftcards();
+        if (!cancelled) setGiftcards(Array.isArray(rows) ? rows : []);
+      } catch {
+        if (!cancelled) setGiftcards([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function updateSource(index, patch) {
     setSources((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+  }
+
+  function updateGiftcardPayment(index, patch) {
+    setGiftcardPayments((prev) =>
+      prev.map((p, i) => (i === index ? { ...p, ...patch } : p))
+    );
   }
 
   function updateItem(index, patch) {
@@ -70,6 +142,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
     setSubCategory('');
     setComment('');
     setSources([emptySource()]);
+    setGiftcardPayments([]);
     setItems([emptyItem()]);
     setPreviewUrl(null);
   }
@@ -97,7 +170,8 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
       setDate(extracted.date);
       setSubCategory(extracted.subCategory);
       setComment(extracted.comment);
-      setSources(extracted.sources);
+      setSources(extracted.sources?.length ? extracted.sources : [emptySource()]);
+      setGiftcardPayments([]);
       setItems(extracted.items);
       setStatus({
         ok: true,
@@ -118,12 +192,18 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
     setSubmitting(true);
     setStatus(null);
     try {
+      const paymentRows = sources
+        .filter((s) => s.source && Number(s.amount) > 0)
+        .map((s) => ({ source: s.source, amount: Number(s.amount) }));
+      const giftcardRows = giftcardPayments
+        .filter((p) => p.giftcardId && Number(p.amount) > 0)
+        .map((p) => ({ giftcardId: p.giftcardId, amount: Number(p.amount) }));
       const result = await addReceipt({
         date,
         store,
         subCategory,
         comment,
-        sources: sources.filter((s) => s.source && Number(s.amount) > 0),
+        sources: [...paymentRows, ...giftcardRows],
         items: items.filter((it) => it.name.trim() && Number(it.money) > 0),
       });
       setStatus({
@@ -240,56 +320,127 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
               + Add source
             </button>
           </div>
-          <div className="space-y-2">
-            {sources.map((s, i) => (
-              <div
-                key={i}
-                className="grid grid-cols-1 min-[400px]:grid-cols-[1fr_7rem_auto] gap-2 items-stretch min-[400px]:items-end rounded-lg border border-bg-border/60 p-3 min-[400px]:border-0 min-[400px]:p-0"
-              >
-                <Field label="Source">
-                  <select
-                    value={s.source}
-                    onChange={(e) => updateSource(i, { source: e.target.value })}
-                    className={selectClass}
-                    required
-                  >
-                    <option value="" disabled>
-                      Select source
-                    </option>
-                    {metadata.sources.map((src) => (
-                      <option key={src.name} value={src.name}>
-                        {src.name}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Amount">
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="0.01"
-                    min="0"
-                    placeholder="0.00"
-                    value={s.amount}
-                    onChange={(e) => updateSource(i, { amount: e.target.value })}
-                    className={inputClass}
-                    required
-                  />
-                </Field>
-                <button
-                  type="button"
-                  disabled={sources.length === 1}
-                  onClick={() => setSources((prev) => prev.filter((_, j) => j !== i))}
-                  aria-label="Remove source"
-                  className="inline-flex items-center justify-center min-h-11 min-w-11 self-end justify-self-end rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+          {sources.length === 0 ? (
+            <p className="text-sm text-text-muted">
+              Optional when the full amount is paid with giftcards.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {sources.map((s, i) => (
+                <div
+                  key={i}
+                  className="grid grid-cols-1 min-[400px]:grid-cols-[1fr_7rem_auto] gap-2 items-stretch min-[400px]:items-end rounded-lg border border-bg-border/60 p-3 min-[400px]:border-0 min-[400px]:p-0"
                 >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            ))}
+                  <Field label="Source">
+                    <select
+                      value={s.source}
+                      onChange={(e) => updateSource(i, { source: e.target.value })}
+                      className={selectClass}
+                    >
+                      <option value="" disabled>
+                        Select source
+                      </option>
+                      {paymentSources.map((src) => (
+                        <option key={src.name} value={src.name}>
+                          {src.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Amount">
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="0.01"
+                      min="0"
+                      placeholder="0.00"
+                      value={s.amount}
+                      onChange={(e) => updateSource(i, { amount: e.target.value })}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <button
+                    type="button"
+                    onClick={() => setSources((prev) => prev.filter((_, j) => j !== i))}
+                    aria-label="Remove source"
+                    className="inline-flex items-center justify-center min-h-11 min-w-11 self-end justify-self-end rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 cursor-pointer"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-sm font-medium text-text-secondary">Giftcards</h4>
+            <button
+              type="button"
+              onClick={() => setGiftcardPayments((prev) => [...prev, emptyGiftcardPayment()])}
+              disabled={giftcards.length === 0}
+              className="text-sm text-accent hover:text-accent-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              + Add giftcard
+            </button>
           </div>
+          {giftcards.length === 0 ? (
+            <p className="text-sm text-text-muted">No giftcards with remaining balance.</p>
+          ) : (
+            <div className="space-y-2">
+              {giftcardPayments.map((p, i) => {
+                const selected = giftcards.find((g) => String(g.id) === String(p.giftcardId));
+                const maxBalance = selected ? Number(selected.balance) || 0 : undefined;
+                return (
+                  <div
+                    key={i}
+                    className="grid grid-cols-1 min-[400px]:grid-cols-[1fr_7rem_auto] gap-2 items-stretch min-[400px]:items-end rounded-lg border border-bg-border/60 p-3 min-[400px]:border-0 min-[400px]:p-0"
+                  >
+                    <Field label="Giftcard">
+                      <select
+                        value={p.giftcardId}
+                        onChange={(e) => updateGiftcardPayment(i, { giftcardId: e.target.value })}
+                        className={selectClass}
+                      >
+                        <option value="" disabled>Select giftcard</option>
+                        {giftcards.map((g) => (
+                          <option key={g.id} value={g.id}>
+                            {g.shop} — remaining {formatAUD(g.balance)}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Amount">
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        min="0"
+                        max={maxBalance || undefined}
+                        placeholder="0.00"
+                        value={p.amount}
+                        onChange={(e) => updateGiftcardPayment(i, { amount: e.target.value })}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <button
+                      type="button"
+                      onClick={() => setGiftcardPayments((prev) => prev.filter((_, j) => j !== i))}
+                      aria-label="Remove giftcard"
+                      className="inline-flex items-center justify-center min-h-11 min-w-11 self-end justify-self-end rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 cursor-pointer"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         <section className="space-y-3">
@@ -383,7 +534,14 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
 
         {itemsTotal > 0 && !sourcesMatch && (
           <p className="text-sm text-expense">
-            Payment sources ({formatAUD(sourcesTotal)}) must equal items total ({formatAUD(itemsTotal)}).
+            Payments ({formatAUD(fundingTotal)}) must equal items total ({formatAUD(itemsTotal)}).
+          </p>
+        )}
+
+        {giftcardOverBalance && (
+          <p className="text-sm text-expense">
+            Giftcard {giftcardOverBalance.label} payment ({formatAUD(giftcardOverBalance.total)}) exceeds
+            remaining balance ({formatAUD(giftcardOverBalance.balance)}).
           </p>
         )}
 

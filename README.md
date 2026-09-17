@@ -105,7 +105,7 @@ One project for the whole repo. Root [`vercel.json`](vercel.json) defines two **
 ## Local architecture notes
 
 - Sessions use **signed cookies** (no DB rows required for auth).
-- Postgres (Docker) stores **Transactions**, **Receipt**, **Receipt_Items**, **Category**, **Sources**, **Giftcard**, **Product**, and **Product_Items** (`id` UUID + `version` on every table; `Receipt.id` equals sheet `Receipt ID`, `Transaction.id` equals sheet `Transaction ID`). Transaction `source` / category FKs point at Sources / Category by name / sub category. Dashboard/history and receipt detail read from Postgres; an empty DB needs **Management → Sync** once to load historical sheet data.
+- Postgres (Docker) stores **Transactions**, **Receipt**, **Receipt_Items**, **Category**, **Sources**, **Giftcard**, **Product**, **Product_Items**, **Payment**, and **GiftcardPayment** (`id` UUID + `version` on every table; `Receipt.id` equals sheet `Receipt ID`, `Transaction.id` equals sheet `Transaction ID`). Receipt rows link to a transaction via `Transaction ID`. Transaction category FKs point at Category by sub category; funding is via Payment / GiftcardPayment. Dashboard/history and receipt detail read from Postgres; an empty DB needs **Management → Sync** once to load historical sheet data.
 - Creates dual-write: Sheets append first, then Postgres mirror after success.
 - CSRF: `GET /api/auth/me` sets the `csrftoken` cookie; the SPA sends `X-CSRFToken` on mutating requests.
 - Append-only writes — no edit/delete of existing sheet rows.

@@ -7,7 +7,16 @@ import ReceiptItemsEditor, {
   emptyReceiptItem,
   toReceiptItemForm,
 } from '../components/ReceiptItemsEditor';
-import { getMetadata, getProducts, getTransaction, updateTransaction, createProductItem, updateProductItem, deleteProductItem } from '../lib/api';
+import {
+  getGiftcards,
+  getMetadata,
+  getProducts,
+  getTransaction,
+  updateTransaction,
+  createProductItem,
+  updateProductItem,
+  deleteProductItem,
+} from '../lib/api';
 import { formatAUD, formatDateShort, parseDate } from '../lib/transform';
 
 function BackLink() {
@@ -99,6 +108,31 @@ export default function TransactionDetail({ onSaved }) {
   );
 }
 
+function initialPayments(data) {
+  const rows = (data.payments || []).map((p) => ({
+    source: p.source || '',
+    amount: p.amount == null ? '' : String(p.amount),
+  }));
+  if (!rows.length && !(data.giftcardPayments || []).length && data.source) {
+    const firstSource = String(data.source).split(' + ')[0] || '';
+    rows.push({
+      source: firstSource,
+      amount: data.change == null ? '' : String(Math.abs(Number(data.change))),
+    });
+  }
+  if (rows.length) return rows;
+  if ((data.giftcardPayments || []).length) return [];
+  return [{ source: '', amount: '' }];
+}
+
+function initialGiftcardPayments(data) {
+  return (data.giftcardPayments || []).map((gp) => ({
+    giftcardId: gp.giftcardId || '',
+    shop: gp.shop || '',
+    amount: gp.amount == null ? '' : String(gp.amount),
+  }));
+}
+
 function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   const hasReceipt = Boolean(data.receiptId && data.receipt);
   const [type, setType] = useState(
@@ -112,7 +146,9 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   const [amount, setAmount] = useState(
     data.change == null ? '' : String(Math.abs(Number(data.change)))
   );
-  const [source, setSource] = useState(data.source || '');
+  const [payments, setPayments] = useState(initialPayments(data));
+  const [giftcardPayments, setGiftcardPayments] = useState(initialGiftcardPayments(data));
+  const [giftcards, setGiftcards] = useState([]);
   const [subCategory, setSubCategory] = useState(data.subCategory || '');
   const [comment, setComment] = useState(data.comment || '');
   const [items, setItems] = useState(
@@ -142,6 +178,38 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
       .catch(() => setCatalogProducts([]));
   }, []);
 
+  useEffect(() => {
+    getGiftcards()
+      .then((rows) => setGiftcards(Array.isArray(rows) ? rows : []))
+      .catch(() => setGiftcards([]));
+  }, []);
+
+  const paymentSources = useMemo(
+    () => (metadata.sources || []).filter((s) => s.name !== 'Giftcard'),
+    [metadata.sources]
+  );
+
+  const giftcardOptions = useMemo(() => {
+    const byId = new Map();
+    for (const g of giftcards) {
+      byId.set(String(g.id), {
+        id: String(g.id),
+        shop: g.shop,
+        balance: Number(g.balance) || 0,
+      });
+    }
+    for (const gp of data.giftcardPayments || []) {
+      const id = String(gp.giftcardId || '');
+      if (!id || byId.has(id)) continue;
+      byId.set(id, {
+        id,
+        shop: gp.shop || 'Giftcard',
+        balance: 0,
+      });
+    }
+    return Array.from(byId.values());
+  }, [giftcards, data.giftcardPayments]);
+
   const categoryOptions = useMemo(() => {
     const filtered = (metadata.categories || []).filter((c) => c.type === type);
     if (subCategory && !filtered.some((c) => c.subCategory === subCategory)) {
@@ -156,27 +224,27 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     [items]
   );
 
-  const siblingTotal = useMemo(
+  const paymentsTotal = useMemo(
     () =>
-      (data.receipt?.sources || [])
-        .filter((s) => s.transactionId !== data.id)
-        .reduce((sum, s) => sum + (Math.abs(Number(s.amount)) || 0), 0),
-    [data]
+      payments.reduce((sum, p) => sum + (Math.abs(Number(p.amount)) || 0), 0)
+      + giftcardPayments.reduce((sum, p) => sum + (Math.abs(Number(p.amount)) || 0), 0),
+    [payments, giftcardPayments]
   );
 
-  const sourcesMatch =
-    !hasReceipt ||
-    (itemsTotal > 0 && Math.abs(itemsTotal - (Math.abs(Number(amount)) || 0) - siblingTotal) < 0.009);
+  const effectiveAmount = hasReceipt ? itemsTotal : Math.abs(Number(amount)) || 0;
+
+  const fundingMatch =
+    effectiveAmount > 0 && Math.abs(effectiveAmount - paymentsTotal) < 0.009;
 
   const canSubmit =
     date &&
-    amount &&
-    Number(amount) > 0 &&
-    source &&
+    effectiveAmount > 0 &&
+    (payments.some((p) => p.source && Number(p.amount) > 0)
+      || giftcardPayments.some((p) => p.giftcardId && Number(p.amount) > 0)) &&
     subCategory &&
+    fundingMatch &&
     !submitting &&
-    (!hasReceipt ||
-      (items.some((it) => it.name.trim() && Number(it.money) > 0) && sourcesMatch));
+    (!hasReceipt || items.some((it) => it.name.trim() && Number(it.money) > 0));
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -186,11 +254,16 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     try {
       const payload = {
         date,
-        amount,
+        amount: hasReceipt ? itemsTotal : amount,
         type,
-        source,
         subCategory,
         comment,
+        payments: payments
+          .filter((p) => p.source && Number(p.amount) > 0)
+          .map((p) => ({ source: p.source, amount: Number(p.amount) })),
+        giftcardPayments: giftcardPayments
+          .filter((p) => p.giftcardId && Number(p.amount) > 0)
+          .map((p) => ({ giftcardId: p.giftcardId, amount: Number(p.amount) })),
       };
       if (hasReceipt) {
         payload.items = items
@@ -287,6 +360,10 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                   key={t}
                   onClick={() => {
                     setType(t);
+                    if (t === 'Income') {
+                      setGiftcardPayments([]);
+                      setPayments((prev) => (prev.length === 0 ? [{ source: '', amount: '' }] : prev));
+                    }
                     if (subCategory) {
                       const stillValid = (metadata.categories || []).some(
                         (c) => c.subCategory === subCategory && c.type === t
@@ -335,40 +412,170 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
               </select>
             </Field>
 
-            <Field label="Source">
-              <select
-                value={source}
-                onChange={(e) => setSource(e.target.value)}
-                className={selectClass}
-                required
-              >
-                <option value="" disabled>
-                  Select a source
-                </option>
-                {(source && !(metadata.sources || []).some((s) => s.name === source)
-                  ? [{ name: source }, ...(metadata.sources || [])]
-                  : metadata.sources || []
-                ).map((s) => (
-                  <option key={s.name} value={s.name}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
+            <Field label="Payments">
+              <div className="space-y-2">
+                {payments.length === 0 ? (
+                  <p className="text-sm text-text-muted">
+                    {type === 'Expense'
+                      ? 'Optional when paid fully with giftcards.'
+                      : 'Add at least one payment source.'}
+                  </p>
+                ) : (
+                  payments.map((p, index) => (
+                    <div key={index} className="grid grid-cols-[1fr_7rem_auto] gap-2 items-center">
+                      <select
+                        value={p.source}
+                        onChange={(e) =>
+                          setPayments((prev) =>
+                            prev.map((row, i) => (i === index ? { ...row, source: e.target.value } : row))
+                          )
+                        }
+                        className={selectClass}
+                      >
+                        <option value="">Source</option>
+                        {paymentSources.map((s) => (
+                          <option key={s.name} value={s.name}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={p.amount}
+                        onChange={(e) =>
+                          setPayments((prev) =>
+                            prev.map((row, i) => (i === index ? { ...row, amount: e.target.value } : row))
+                          )
+                        }
+                        className={inputClass}
+                        placeholder="0.00"
+                      />
+                      <button
+                        type="button"
+                        className="text-xs text-text-muted hover:text-expense px-2"
+                        disabled={type === 'Income' && payments.length === 1 && !giftcardPayments.length}
+                        onClick={() => setPayments((prev) => prev.filter((_, i) => i !== index))}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))
+                )}
+                <button
+                  type="button"
+                  className="text-sm text-accent hover:text-accent-hover"
+                  onClick={() => setPayments((prev) => [...prev, { source: '', amount: '' }])}
+                >
+                  + Add payment
+                </button>
+              </div>
             </Field>
 
-            <Field label="Amount (AUD)">
-              <input
-                type="number"
-                inputMode="decimal"
-                step="0.01"
-                min="0"
-                placeholder="0.00"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                className={inputClass}
-                required
-              />
-            </Field>
+            {type === 'Expense' && (
+              <Field label="Giftcards">
+                <div className="space-y-2">
+                  {giftcardPayments.length === 0 ? (
+                    <p className="text-sm text-text-muted">No giftcard payments.</p>
+                  ) : (
+                    giftcardPayments.map((p, index) => {
+                      const selected = giftcardOptions.find((g) => String(g.id) === String(p.giftcardId));
+                      return (
+                        <div key={index} className="grid grid-cols-[1fr_7rem_auto] gap-2 items-center">
+                          <select
+                            value={p.giftcardId}
+                            onChange={(e) => {
+                              const next = giftcardOptions.find((g) => String(g.id) === e.target.value);
+                              setGiftcardPayments((prev) =>
+                                prev.map((row, i) =>
+                                  i === index
+                                    ? {
+                                        ...row,
+                                        giftcardId: e.target.value,
+                                        shop: next?.shop || row.shop || '',
+                                      }
+                                    : row
+                                )
+                              );
+                            }}
+                            className={selectClass}
+                          >
+                            <option value="">Giftcard</option>
+                            {giftcardOptions.map((g) => (
+                              <option key={g.id} value={g.id}>
+                                {g.shop}
+                                {g.balance > 0 ? ` — remaining ${formatAUD(g.balance)}` : ''}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            max={selected?.balance > 0 ? selected.balance : undefined}
+                            value={p.amount}
+                            onChange={(e) =>
+                              setGiftcardPayments((prev) =>
+                                prev.map((row, i) =>
+                                  i === index ? { ...row, amount: e.target.value } : row
+                                )
+                              )
+                            }
+                            className={inputClass}
+                            placeholder="0.00"
+                          />
+                          <button
+                            type="button"
+                            className="text-xs text-text-muted hover:text-expense px-2"
+                            onClick={() =>
+                              setGiftcardPayments((prev) => prev.filter((_, i) => i !== index))
+                            }
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                  <button
+                    type="button"
+                    className="text-sm text-accent hover:text-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
+                    disabled={giftcardOptions.length === 0}
+                    onClick={() =>
+                      setGiftcardPayments((prev) => [
+                        ...prev,
+                        { giftcardId: '', shop: '', amount: '' },
+                      ])
+                    }
+                  >
+                    + Add giftcard
+                  </button>
+                </div>
+              </Field>
+            )}
+
+            {!hasReceipt && (
+              <Field label="Amount (AUD)">
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  placeholder="0.00"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className={inputClass}
+                  required
+                />
+              </Field>
+            )}
+
+            {hasReceipt && (
+              <p className="text-sm text-text-muted">
+                Total: {formatAUD(itemsTotal)} · Payments: {formatAUD(paymentsTotal)}
+              </p>
+            )}
 
             <Field label="Comment">
               <input
@@ -517,11 +724,14 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
         </div>
       </Card>
 
-      {hasReceipt && itemsTotal > 0 && !sourcesMatch && (
+      {hasReceipt && itemsTotal > 0 && !fundingMatch && (
         <p className="text-sm text-expense">
-          {siblingTotal > 0
-            ? `This payment (${formatAUD(Math.abs(Number(amount)) || 0)}) plus other receipt payments (${formatAUD(siblingTotal)}) must equal items total (${formatAUD(itemsTotal)}).`
-            : `Amount (${formatAUD(Math.abs(Number(amount)) || 0)}) must equal items total (${formatAUD(itemsTotal)}).`}
+          Payment total ({formatAUD(paymentsTotal)}) must equal items total ({formatAUD(itemsTotal)}).
+        </p>
+      )}
+      {!hasReceipt && effectiveAmount > 0 && !fundingMatch && (
+        <p className="text-sm text-expense">
+          Payment total ({formatAUD(paymentsTotal)}) must equal amount ({formatAUD(effectiveAmount)}).
         </p>
       )}
 

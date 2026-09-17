@@ -12,6 +12,8 @@ import {
 
 const TABLES = [
   { key: 'transactions', label: 'Transactions' },
+  { key: 'payment', label: 'Payments' },
+  { key: 'giftcard_payment', label: 'Giftcard Payments' },
   { key: 'receipt', label: 'Receipt' },
   { key: 'receipt_items', label: 'Receipt Items' },
   { key: 'giftcards', label: 'Giftcards' },
@@ -22,7 +24,7 @@ const TABLES = [
 ];
 
 const SYNC_CONFIRM =
-  'This will delete your Transactions, Giftcards, Receipts, Receipt Items, Products, Product Items, Categories, and Sources in Postgres and reload them from your Google Sheet. Continue?';
+  'This will delete your Transactions, Payments, Giftcard Payments, Giftcards, Receipts, Receipt Items, Products, Product Items, Categories, and Sources in Postgres and reload them from your Google Sheet. Continue?';
 
 function confirmSync() {
   return window.confirm(SYNC_CONFIRM);
@@ -93,7 +95,7 @@ export default function Management() {
       const result = await syncManagement();
       const inserted = result?.inserted || {};
       setSyncMessage(
-        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards, ${inserted.products ?? 0} products, ${inserted.product_items ?? 0} product items, ${inserted.category ?? 0} categories, ${inserted.sources ?? 0} sources.`
+        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.payment ?? 0} payments, ${inserted.giftcard_payment ?? 0} giftcard payments, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards, ${inserted.products ?? 0} products, ${inserted.product_items ?? 0} product items, ${inserted.category ?? 0} categories, ${inserted.sources ?? 0} sources.`
       );
       await loadStatus({ force: true });
     } catch (err) {
@@ -257,6 +259,8 @@ export default function Management() {
         <div className="p-4 rounded-xl border border-income/30 bg-income/5 text-income text-sm space-y-1">
           <p>
             Exported {exportResult.counts?.transactions ?? 0} transactions,{' '}
+            {exportResult.counts?.payment ?? 0} payments,{' '}
+            {exportResult.counts?.giftcard_payment ?? 0} giftcard payments,{' '}
             {exportResult.counts?.receipt ?? 0} receipts,{' '}
             {exportResult.counts?.receipt_items ?? 0} receipt items,{' '}
             {exportResult.counts?.giftcards ?? 0} giftcards,{' '}

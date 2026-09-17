@@ -57,7 +57,10 @@ export function normalizeRows(rows, categories = [], { sort = true } = {}) {
         date: parseDate(r['Date']),
         creationDate: parseDate(r['Creation Date'] || r.creationDate),
         change: parseAmount(r['Change']),
-        source: String(r['Source'] || '').trim(),
+        source: String(r['Source'] || r.sourcesSummary || '').trim(),
+        sourcesSummary: String(r.sourcesSummary || r['Source'] || '').trim(),
+        payments: Array.isArray(r.payments) ? r.payments : [],
+        giftcardPayments: Array.isArray(r.giftcardPayments) ? r.giftcardPayments : [],
         comment: String(r['Comment'] || '').trim(),
         subCategory,
         mainCategory: String(cat?.mainCategory || r['Main Category'] || '').trim(),
@@ -66,7 +69,7 @@ export function normalizeRows(rows, categories = [], { sort = true } = {}) {
         giftcardId: String(r['Giftcard ID'] || r.giftcardId || '').trim() || null,
       };
     })
-    .filter((r) => r.date && r.source);
+    .filter((r) => r.date && (r.source || r.payments?.length || r.giftcardPayments?.length));
 
   if (!sort) return mapped;
   return mapped.sort((a, b) => (a.date - b.date) || ((a.creationDate || 0) - (b.creationDate || 0)));
@@ -76,7 +79,19 @@ export function normalizeRows(rows, categories = [], { sort = true } = {}) {
 export function currentBalances(transactions) {
   const balances = {};
   for (const t of transactions) {
-    balances[t.source] = (balances[t.source] || 0) + t.change;
+    const sign = t.change < 0 ? -1 : t.change > 0 ? 1 : 0;
+    if (t.payments?.length) {
+      for (const p of t.payments) {
+        const amt = Math.abs(Number(p.amount) || 0);
+        if (p.source && amt) {
+          balances[p.source] = (balances[p.source] || 0) + sign * amt;
+        }
+      }
+      continue;
+    }
+    if (t.source) {
+      balances[t.source] = (balances[t.source] || 0) + t.change;
+    }
   }
   return balances;
 }

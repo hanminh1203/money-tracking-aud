@@ -107,6 +107,8 @@ SOURCES_TABLE = os.environ.get('SOURCES_TABLE', 'Sources')
 RECEIPT_TABLE = os.environ.get('RECEIPT_TABLE', 'Receipt')
 RECEIPT_ITEMS_TABLE = os.environ.get('RECEIPT_ITEMS_TABLE', 'Receipt_Items')
 GIFTCARD_TABLE = os.environ.get('GIFTCARD_TABLE', 'Giftcard')
+PAYMENT_TABLE = os.environ.get('PAYMENT_TABLE', 'Payment')
+GIFTCARD_PAYMENT_TABLE = os.environ.get('GIFTCARD_PAYMENT_TABLE', 'GiftcardPayment')
 PRODUCT_TABLE = os.environ.get('PRODUCT_TABLE', 'Product')
 PRODUCT_ITEMS_TABLE = os.environ.get('PRODUCT_ITEMS_TABLE', 'Product_Items')
 

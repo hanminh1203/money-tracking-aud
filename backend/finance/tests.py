@@ -19,6 +19,7 @@ from finance.db_writer import save_product_item, update_product_item
 from finance.models import (
     Category,
     Giftcard,
+    Payment,
     Product,
     ProductItem,
     Receipt,
@@ -39,6 +40,8 @@ def sheet_mirror(**overrides):
         'giftcards': [],
         'products': [],
         'product_items': [],
+        'payments': [],
+        'giftcard_payments': [],
         'categories': [
             {
                 'Main Category': 'Earnings',
@@ -77,15 +80,25 @@ class DashboardDataTests(TestCase):
         )
 
     def add_transaction(self, row, value, amount, category=None, comment='', user=None, source=None):
-        return Transaction.objects.create(
-            user=user or self.user,
+        owner = user or self.user
+        src = source or self.source
+        signed = Decimal(amount)
+        tx = Transaction.objects.create(
+            user=owner,
             row_number=row,
             date=value,
-            change=Decimal(amount),
-            source=source or self.source,
+            change=signed,
             category=category,
             comment=comment,
         )
+        Payment.objects.create(
+            user=owner,
+            transaction=tx,
+            source=src,
+            amount=abs(signed),
+            row_number=row,
+        )
+        return tx
 
     @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
     def test_dashboard_calculates_current_month_and_three_month_breakdowns(self, _localdate):
@@ -256,13 +269,19 @@ class SyncIsolationTests(TestCase):
             sub_category='Salary',
             type='Income',
         )
-        Transaction.objects.create(
+        tx_b = Transaction.objects.create(
             user=self.user_b,
             row_number=1,
             date=date(2026, 1, 1),
             change=Decimal('50.00'),
-            source=self.source,
             category=self.salary,
+        )
+        Payment.objects.create(
+            user=self.user_b,
+            transaction=tx_b,
+            source=self.source,
+            amount=Decimal('50.00'),
+            row_number=1,
         )
         Giftcard.objects.create(
             user=self.user_b,
@@ -281,13 +300,20 @@ class SyncIsolationTests(TestCase):
                     'Transaction ID': 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
                     'Date': '2026-01-10',
                     'Change': '100',
-                    'Source': 'Everyday',
                     'Comment': 'Pay',
                     'Sub category': 'Salary',
-                    'Receipt ID': '',
-                    'Giftcard ID': '',
                 }
             ],
+            payments=[
+                {
+                    '__sheet_row': 3,
+                    'Payment ID': 'e5f6a7b8-c9d0-1234-ef01-234567890abc',
+                    'Transaction ID': 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+                    'Source': 'Everyday',
+                    'Amount': '100',
+                }
+            ],
+            giftcard_payments=[],
         )
 
         result = sync_from_sheets(client, user=self.user_a)
@@ -307,7 +333,8 @@ class SyncIsolationTests(TestCase):
         self.assertEqual(
             str(synced.id), 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
         )
-        self.assertEqual(synced.source.user_id, self.user_a.id)
+        payment = Payment.objects.get(transaction=synced)
+        self.assertEqual(payment.source.user_id, self.user_a.id)
         self.assertEqual(synced.category.user_id, self.user_a.id)
 
     def test_sync_replaces_current_user_sources_and_categories(self):
@@ -349,13 +376,20 @@ class SyncIsolationTests(TestCase):
                     'Transaction ID': str(tx_id),
                     'Date': '2026-01-10',
                     'Change': '-25',
-                    'Source': 'Everyday',
                     'Comment': 'Shop',
                     'Sub category': 'Salary',
-                    'Receipt ID': '',
-                    'Giftcard ID': '',
                 }
             ],
+            payments=[
+                {
+                    '__sheet_row': 3,
+                    'Payment ID': 'f6a7b8c9-d0e1-2345-f012-345678901bcd',
+                    'Transaction ID': str(tx_id),
+                    'Source': 'Everyday',
+                    'Amount': '25',
+                }
+            ],
+            giftcard_payments=[],
             products=[
                 {'Product ID': str(product_id), 'Name': 'Milk'},
             ],
@@ -407,6 +441,22 @@ class SyncIsolationTests(TestCase):
                     'Sub category': 'Salary',
                     'Receipt ID': '',
                     'Giftcard ID': '',
+                },
+            ],
+            payments=[
+                {
+                    '__sheet_row': 2,
+                    'Payment ID': 'a1a1a1a1-b2b2-c3c3-d4d4-e5e5e5e5e5e5',
+                    'Transaction ID': str(tx_id),
+                    'Source': 'Everyday',
+                    'Amount': '25',
+                },
+                {
+                    '__sheet_row': 3,
+                    'Payment ID': 'b2b2b2b2-c3c3-d4d4-e5e5-f6f6f6f6f6f6',
+                    'Transaction ID': str(tx2_id),
+                    'Source': 'Everyday',
+                    'Amount': '8',
                 },
             ],
             products=[
@@ -473,6 +523,15 @@ class SyncIsolationTests(TestCase):
                     'Giftcard ID': '',
                 }
             ],
+            payments=[
+                {
+                    '__sheet_row': 2,
+                    'Payment ID': 'c3c3c3c3-d4d4-e5e5-f6f6-a7a7a7a7a7a7',
+                    'Transaction ID': str(tx_id),
+                    'Source': 'Everyday',
+                    'Amount': '25',
+                }
+            ],
             products=[
                 {'Product ID': str(product_id), 'Name': 'Milk'},
             ],
@@ -505,17 +564,25 @@ class TransactionDetailTests(TestCase):
         )
 
     def add_transaction(self, **kwargs):
+        source = kwargs.pop('source', self.source)
         defaults = {
             'user': self.user,
             'row_number': 1,
             'date': date(2026, 1, 8),
             'change': Decimal('-42.50'),
-            'source': self.source,
             'category': self.groceries,
             'comment': 'Woolworths : weekly shop',
         }
         defaults.update(kwargs)
-        return Transaction.objects.create(**defaults)
+        tx = Transaction.objects.create(**defaults)
+        Payment.objects.create(
+            user=tx.user,
+            transaction=tx,
+            source=source,
+            amount=abs(tx.change),
+            row_number=tx.row_number,
+        )
+        return tx
 
     def test_get_transaction_without_receipt(self):
         tx = self.add_transaction()
@@ -534,8 +601,10 @@ class TransactionDetailTests(TestCase):
         self.assertIsNone(data['receipt'])
 
     def test_get_transaction_with_receipt_items(self):
+        tx = self.add_transaction()
         receipt = Receipt.objects.create(
             user=self.user,
+            transaction=tx,
             date=date(2026, 1, 8),
             total=Decimal('12.50'),
         )
@@ -555,7 +624,6 @@ class TransactionDetailTests(TestCase):
             unit='loaf',
             money=Decimal('8.00'),
         )
-        tx = self.add_transaction(receipt=receipt)
 
         data = get_transaction(user=self.user, transaction_id=str(tx.id))
 
@@ -656,15 +724,17 @@ class TransactionDetailTests(TestCase):
             transaction=tx,
             date='2026-02-01',
             change='150.00',
-            source='Savings',
             comment='Pay',
             sub_category='Salary',
+            payments=[{'source': 'Savings', 'amount': '150.00', 'row_number': 2}],
         )
 
         tx.refresh_from_db()
         self.assertEqual(tx.date, date(2026, 2, 1))
         self.assertEqual(tx.change, Decimal('150.00'))
-        self.assertEqual(tx.source_id, savings.id)
+        payment = Payment.objects.get(transaction=tx)
+        self.assertEqual(payment.source_id, savings.id)
+        self.assertEqual(payment.amount, Decimal('150.00'))
         self.assertEqual(tx.comment, 'Pay')
         self.assertEqual(tx.category_id, salary.id)
         self.assertEqual(tx.version, 2)
@@ -672,8 +742,10 @@ class TransactionDetailTests(TestCase):
     def test_update_transaction_detail_replaces_receipt_items(self):
         from finance.db_writer import update_transaction_detail
 
+        tx = self.add_transaction()
         receipt = Receipt.objects.create(
             user=self.user,
+            transaction=tx,
             date=date(2026, 1, 8),
             total=Decimal('12.50'),
         )
@@ -685,16 +757,15 @@ class TransactionDetailTests(TestCase):
             unit='L',
             money=Decimal('4.50'),
         )
-        tx = self.add_transaction(receipt=receipt)
 
         update_transaction_detail(
             user=self.user,
             transaction=tx,
             date='2026-01-09',
             change='-10.00',
-            source='Everyday',
             comment='Coles : restock',
             sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '10.00', 'row_number': 1}],
             receipt_total='10.00',
             items=[
                 {'name': 'Eggs', 'amount': 12, 'unit': 'piece', 'money': 10},
@@ -758,12 +829,13 @@ class TransactionDetailTests(TestCase):
         self.assertEqual(response.status_code, 401)
 
     def test_update_requires_items_when_receipt_linked(self):
-        receipt = Receipt.objects.create(
+        tx = self.add_transaction()
+        Receipt.objects.create(
             user=self.user,
+            transaction=tx,
             date=date(2026, 1, 8),
             total=Decimal('12.50'),
         )
-        tx = self.add_transaction(receipt=receipt)
         client = SheetsClient('token', 'sheet-id', user=self.user)
 
         with self.assertRaises(SheetsError) as ctx:
@@ -779,12 +851,13 @@ class TransactionDetailTests(TestCase):
         self.assertIn('items are required', str(ctx.exception))
 
     def test_update_rejects_item_total_mismatch(self):
-        receipt = Receipt.objects.create(
+        tx = self.add_transaction()
+        Receipt.objects.create(
             user=self.user,
+            transaction=tx,
             date=date(2026, 1, 8),
             total=Decimal('12.50'),
         )
-        tx = self.add_transaction(receipt=receipt)
         client = SheetsClient('token', 'sheet-id', user=self.user)
 
         with self.assertRaises(SheetsError) as ctx:
@@ -798,7 +871,7 @@ class TransactionDetailTests(TestCase):
                 comment='Woolworths : weekly shop',
                 items=[{'name': 'Milk', 'amount': 1, 'unit': 'L', 'money': 4.5}],
             )
-        self.assertIn('must equal items total', str(ctx.exception))
+        self.assertIn('must equal', str(ctx.exception))
 
     def test_update_rejects_items_when_not_receipt_linked(self):
         tx = self.add_transaction()
@@ -831,15 +904,22 @@ class ProductTests(TestCase):
         self.product = Product.objects.create(user=self.user, name='Toothpaste')
 
     def add_transaction(self, row, value, amount, comment=''):
-        return Transaction.objects.create(
+        tx = Transaction.objects.create(
             user=self.user,
             row_number=row,
             date=value,
             change=Decimal(amount),
-            source=self.source,
             category=self.groceries,
             comment=comment,
         )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=self.source,
+            amount=abs(Decimal(amount)),
+            row_number=row,
+        )
+        return tx
 
     def test_product_item_requires_price_for_transaction_link(self):
         tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
@@ -853,7 +933,13 @@ class ProductTests(TestCase):
 
     def test_product_item_xor_link_constraint(self):
         tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
-        receipt = Receipt.objects.create(user=self.user, date=date(2026, 1, 1), total=Decimal('8.50'))
+        receipt_tx = self.add_transaction(3, date(2026, 1, 1), '-8.50')
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=receipt_tx,
+            date=date(2026, 1, 1),
+            total=Decimal('8.50'),
+        )
         item = ReceiptItem.objects.create(
             user=self.user,
             receipt=receipt,
@@ -984,8 +1070,25 @@ class ProductTests(TestCase):
         self.assertEqual(export['product_items']['rows'][0][-1], '2026-03-01')
 
     def test_receipt_item_product_includes_end_date(self):
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=9,
+            date=date(2026, 1, 8),
+            change=Decimal('-8.50'),
+            category=self.groceries,
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=self.source,
+            amount=Decimal('8.50'),
+            row_number=9,
+        )
         receipt = Receipt.objects.create(
-            user=self.user, date=date(2026, 1, 8), total=Decimal('8.50')
+            user=self.user,
+            transaction=tx,
+            date=date(2026, 1, 8),
+            total=Decimal('8.50'),
         )
         item = ReceiptItem.objects.create(
             user=self.user,
@@ -995,33 +1098,25 @@ class ProductTests(TestCase):
             unit='tube',
             money=Decimal('8.50'),
         )
-        Transaction.objects.create(
-            user=self.user,
-            row_number=9,
-            date=date(2026, 1, 8),
-            change=Decimal('-8.50'),
-            source=self.source,
-            category=self.groceries,
-            receipt=receipt,
-        )
         ProductItem.objects.create(
             user=self.user,
             product=self.product,
             receipt_item=item,
             end_date=date(2026, 5, 1),
         )
-        data = get_transaction(
-            user=self.user,
-            transaction_id=str(Transaction.objects.get(user=self.user, receipt=receipt).id),
-        )
+        data = get_transaction(user=self.user, transaction_id=str(tx.id))
         linked = data['receipt']['items'][0]
         self.assertEqual(linked['productId'], str(self.product.id))
         self.assertEqual(linked['endDate'], '2026-05-01')
 
     def test_product_item_xor_still_enforced_with_end_date(self):
         tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
+        receipt_tx = self.add_transaction(3, date(2026, 1, 1), '-8.50')
         receipt = Receipt.objects.create(
-            user=self.user, date=date(2026, 1, 1), total=Decimal('8.50')
+            user=self.user,
+            transaction=receipt_tx,
+            date=date(2026, 1, 1),
+            total=Decimal('8.50'),
         )
         item = ReceiptItem.objects.create(
             user=self.user,
@@ -1098,3 +1193,159 @@ class ProductTests(TestCase):
             product_item_id='pi-1',
             end_date=None,
         )
+
+
+class FundingTests(TestCase):
+    def test_validate_funding_allows_giftcard_only(self):
+        from finance.funding import validate_funding
+
+        validate_funding(
+            '-25',
+            [],
+            [{'giftcard_id': 'g1', 'amount': '25'}],
+        )
+
+    def test_aggregate_giftcard_debits(self):
+        from finance.funding import aggregate_giftcard_debits
+
+        totals = aggregate_giftcard_debits(
+            [
+                {'giftcardId': 'aaa', 'amount': '10'},
+                {'giftcard_id': 'aaa', 'amount': '5.50'},
+                {'giftcard_id': 'bbb', 'amount': '3'},
+            ]
+        )
+        self.assertEqual(totals['aaa'], Decimal('15.50'))
+        self.assertEqual(totals['bbb'], Decimal('3'))
+
+    def test_validate_giftcard_debit_rejects_overspend(self):
+        from finance.funding import validate_giftcard_debit
+
+        self.assertEqual(validate_giftcard_debit('20.00', '7.50'), Decimal('12.50'))
+        with self.assertRaises(ValueError) as ctx:
+            validate_giftcard_debit('10.00', '10.50')
+        self.assertIn('exceeds giftcard balance', str(ctx.exception))
+
+
+class GiftcardDebitWriteTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='gc-debit@example.com')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.giftcard = Giftcard.objects.create(
+            user=self.user,
+            row_number=2,
+            shop='Coles',
+            date=date(2026, 1, 1),
+            balance=Decimal('40.00'),
+        )
+
+    def test_save_transaction_bundle_debits_giftcard(self):
+        from finance import db_writer
+
+        gid = str(self.giftcard.id)
+        db_writer.save_transaction_bundle(
+            user=self.user,
+            date='2026-01-15',
+            change='-50.00',
+            row_number=1,
+            sub_category='Groceries',
+            comment='Mixed pay',
+            payments=[
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': '30.00',
+                    'row_number': 1,
+                }
+            ],
+            giftcard_payments=[
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': gid,
+                    'amount': '20.00',
+                    'row_number': 1,
+                }
+            ],
+            giftcard_debits=[{'giftcard_id': gid, 'new_balance': '20.00'}],
+        )
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('20.00'))
+        tx = Transaction.objects.get(user=self.user, row_number=1)
+        self.assertEqual(tx.payments.count(), 1)
+        self.assertEqual(tx.giftcard_payments.count(), 1)
+
+    def test_plan_giftcard_debits_rejects_overspend(self):
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        with self.assertRaises(SheetsError) as ctx:
+            client.plan_giftcard_debits(
+                [{'giftcard_id': str(self.giftcard.id), 'amount': '50'}]
+            )
+        self.assertIn('exceeds giftcard balance', str(ctx.exception))
+
+    def test_plan_giftcard_debits_aggregates_same_card(self):
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        planned = client.plan_giftcard_debits(
+            [
+                {'giftcard_id': str(self.giftcard.id), 'amount': '10'},
+                {'giftcard_id': str(self.giftcard.id), 'amount': '5'},
+            ]
+        )
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0]['amount'], 15.0)
+        self.assertEqual(planned[0]['new_balance'], 25.0)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
+    def test_add_transaction_applies_giftcard_debit(
+        self, _append_tx, append_funding, apply_debits
+    ):
+        from finance import db_writer
+
+        gid = str(self.giftcard.id)
+        append_funding.return_value = (
+            [
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': 30.0,
+                    'row_number': 1,
+                }
+            ],
+            [
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': gid,
+                    'amount': 20.0,
+                    'row_number': 1,
+                }
+            ],
+        )
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        with patch.object(db_writer, 'save_transaction_bundle', wraps=db_writer.save_transaction_bundle) as save_bundle:
+            result = client.add_transaction(
+                date='2026-01-15',
+                amount=50,
+                type='Expense',
+                sub_category='Groceries',
+                comment='Shop',
+                payments=[{'source': 'Everyday', 'amount': 30}],
+                giftcard_payments=[{'giftcardId': gid, 'amount': 20}],
+            )
+        self.assertEqual(result['added'], 1)
+        apply_debits.assert_called_once()
+        debits = apply_debits.call_args.args[0]
+        self.assertEqual(debits[0]['new_balance'], 20.0)
+        save_bundle.assert_called_once()
+        self.assertEqual(
+            save_bundle.call_args.kwargs['giftcard_debits'][0]['new_balance'],
+            20.0,
+        )
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('20.00'))
