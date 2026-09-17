@@ -111,7 +111,7 @@ def migrate_transaction_funding(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('finance', '0011_product_and_product_item'),
+        ('finance', '0013_user_scoped_category_source'),
     ]
 
     operations = [

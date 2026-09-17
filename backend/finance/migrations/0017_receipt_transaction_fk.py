@@ -39,9 +39,12 @@ def backwards_move_link(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    # RunPython data move + ALTER/RemoveField in one atomic block hits Postgres
+    # "pending trigger events".
+    atomic = False
 
     dependencies = [
-        ('finance', '0014_remove_productitem_product_item_xor_link_and_more'),
+        ('finance', '0016_remove_productitem_product_item_xor_link_and_more'),
     ]
 
     operations = [
