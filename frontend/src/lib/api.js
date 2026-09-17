@@ -131,6 +131,10 @@ export function createProductItem(payload) {
   return api('/product-items', { method: 'POST', body: payload });
 }
 
+export function updateProductItem(id, payload) {
+  return api(`/product-items/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+}
+
 export function deleteProductItem(id) {
   return api(`/product-items/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

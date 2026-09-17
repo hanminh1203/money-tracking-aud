@@ -17,10 +17,12 @@ const TABLES = [
   { key: 'giftcards', label: 'Giftcards' },
   { key: 'products', label: 'Products' },
   { key: 'product_items', label: 'Product Items' },
+  { key: 'category', label: 'Category' },
+  { key: 'sources', label: 'Sources' },
 ];
 
 const SYNC_CONFIRM =
-  'This will delete your Transactions, Giftcards, Receipts, Receipt Items, Products, and Product Items in Postgres and reload them from your Google Sheet. Continue?';
+  'This will delete your Transactions, Giftcards, Receipts, Receipt Items, Products, Product Items, Categories, and Sources in Postgres and reload them from your Google Sheet. Continue?';
 
 function confirmSync() {
   return window.confirm(SYNC_CONFIRM);
@@ -91,7 +93,7 @@ export default function Management() {
       const result = await syncManagement();
       const inserted = result?.inserted || {};
       setSyncMessage(
-        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards, ${inserted.products ?? 0} products, ${inserted.product_items ?? 0} product items.`
+        `Synced ${inserted.transactions ?? 0} transactions, ${inserted.receipt ?? 0} receipts, ${inserted.receipt_items ?? 0} receipt items, ${inserted.giftcards ?? 0} giftcards, ${inserted.products ?? 0} products, ${inserted.product_items ?? 0} product items, ${inserted.category ?? 0} categories, ${inserted.sources ?? 0} sources.`
       );
       await loadStatus({ force: true });
     } catch (err) {
@@ -204,6 +206,9 @@ export default function Management() {
             <code className="text-xs">Product_Items</code> (
             <code className="text-xs">Product Item ID</code>, <code className="text-xs">Product ID</code>,{' '}
             <code className="text-xs">Price</code>, <code className="text-xs">Transaction ID</code>,{' '}
+            <code className="text-xs">Receipt Item ID</code>, <code className="text-xs">End Date</code>
+            ). Existing sheets need an <code className="text-xs">End Date</code> column added to{' '}
+            <code className="text-xs">Product_Items</code> (DATE, after{' '}
             <code className="text-xs">Receipt Item ID</code>). Add a{' '}
             <code className="text-xs">Transaction ID</code> column as the first column in{' '}
             <code className="text-xs">Transactions</code>. Add a{' '}

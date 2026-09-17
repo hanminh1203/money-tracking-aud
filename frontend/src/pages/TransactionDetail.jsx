@@ -7,7 +7,7 @@ import ReceiptItemsEditor, {
   emptyReceiptItem,
   toReceiptItemForm,
 } from '../components/ReceiptItemsEditor';
-import { getMetadata, getProducts, getTransaction, updateTransaction, createProductItem, deleteProductItem } from '../lib/api';
+import { getMetadata, getProducts, getTransaction, updateTransaction, createProductItem, updateProductItem, deleteProductItem } from '../lib/api';
 import { formatAUD, formatDateShort, parseDate } from '../lib/transform';
 
 function BackLink() {
@@ -126,11 +126,13 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
       productId: p.productId,
       name: p.name,
       price: p.price == null ? '' : String(p.price),
+      endDate: p.endDate || '',
     }))
   );
   const [catalogProducts, setCatalogProducts] = useState([]);
   const [newProductId, setNewProductId] = useState('');
   const [newProductPrice, setNewProductPrice] = useState('');
+  const [newProductEndDate, setNewProductEndDate] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState(null);
 
@@ -210,11 +212,20 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
         }
       }
       for (const p of txProducts) {
+        if (p.productItemId) {
+          const orig = originalProducts.find((o) => o.id === p.productItemId);
+          const origEnd = orig?.endDate || '';
+          const newEnd = p.endDate || '';
+          if (origEnd !== newEnd) {
+            await updateProductItem(p.productItemId, { endDate: newEnd || null });
+          }
+        }
         if (!p.productItemId && p.productId) {
           await createProductItem({
             productId: p.productId,
             transactionId: data.id,
             price: Number(p.price),
+            endDate: p.endDate || null,
           });
         }
       }
@@ -237,7 +248,14 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
             await createProductItem({
               productId: newProductId,
               receiptItemId: freshItem.id,
+              endDate: formItem.endDate || null,
             });
+          } else if (orig?.productItemId && newProductId === origProductId) {
+            const origEnd = orig.endDate || '';
+            const newEnd = formItem.endDate || '';
+            if (origEnd !== newEnd) {
+              await updateProductItem(orig.productItemId, { endDate: newEnd || null });
+            }
           }
         }
       }
@@ -400,7 +418,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                   key={p.productItemId || `new-${p.productId}-${index}`}
                   className="flex items-center justify-between gap-3 rounded-lg border border-bg-border/60 px-3 py-2"
                 >
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-text-primary truncate">
                       {p.name ||
                         catalogProducts.find((c) => c.id === p.productId)?.name ||
@@ -410,6 +428,18 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                       <p className="text-xs text-text-muted tabular-money">{formatAUD(p.price)}</p>
                     )}
                   </div>
+                  <Field label="End date" className="w-40 shrink-0">
+                    <input
+                      type="date"
+                      value={p.endDate || ''}
+                      onChange={(e) => {
+                        const next = [...txProducts];
+                        next[index] = { ...p, endDate: e.target.value };
+                        setTxProducts(next);
+                      }}
+                      className={inputClass}
+                    />
+                  </Field>
                   <button
                     type="button"
                     onClick={() => setTxProducts(txProducts.filter((_, i) => i !== index))}
@@ -422,7 +452,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
             </ul>
           )}
           {catalogProducts.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-[1fr_8rem_auto] gap-2 items-end pt-1">
+            <div className="grid grid-cols-1 sm:grid-cols-[1fr_8rem_9rem_auto] gap-2 items-end pt-1">
               <Field label="Product">
                 <select
                   value={newProductId}
@@ -450,6 +480,14 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                   placeholder="0.00"
                 />
               </Field>
+              <Field label="End date">
+                <input
+                  type="date"
+                  value={newProductEndDate}
+                  onChange={(e) => setNewProductEndDate(e.target.value)}
+                  className={inputClass}
+                />
+              </Field>
               <button
                 type="button"
                 className="btn-secondary min-h-11"
@@ -464,10 +502,12 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                       productId: picked.id,
                       name: picked.name,
                       price: newProductPrice,
+                      endDate: newProductEndDate,
                     },
                   ]);
                   setNewProductId('');
                   setNewProductPrice('');
+                  setNewProductEndDate('');
                 }}
               >
                 Add

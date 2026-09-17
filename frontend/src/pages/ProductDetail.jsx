@@ -10,6 +10,7 @@ import {
   deleteProductItem,
   getProduct,
   getProductCandidates,
+  updateProductItem,
 } from '../lib/api';
 import { formatAUD, formatDateShort } from '../lib/transform';
 
@@ -60,6 +61,16 @@ export default function ProductDetail({ onSaved }) {
     if (!window.confirm('Remove this purchase link?')) return;
     try {
       await deleteProductItem(productItemId);
+      onSaved?.();
+      await load();
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  async function handleEndDateChange(productItemId, value) {
+    try {
+      await updateProductItem(productItemId, { endDate: value || null });
       onSaved?.();
       await load();
     } catch (err) {
@@ -151,11 +162,22 @@ export default function ProductDetail({ onSaved }) {
                             </p>
                             <p className="text-xs text-text-muted tabular-nums mt-0.5">
                               {p.date ? formatDateShort(p.date) : '—'}
+                              {p.endDate ? ` · until ${formatDateShort(p.endDate)}` : ''}
                             </p>
                           </div>
                           <span className="text-sm tabular-money text-expense shrink-0">
                             {formatAUD(p.price)}
                           </span>
+                        </div>
+                        <div className="mt-2">
+                          <Field label="End date">
+                            <input
+                              type="date"
+                              className={inputClass}
+                              value={p.endDate || ''}
+                              onChange={(e) => handleEndDateChange(p.id, e.target.value)}
+                            />
+                          </Field>
                         </div>
                         <div className="mt-2 flex items-center gap-2">
                           {p.transactionId && (
@@ -182,6 +204,7 @@ export default function ProductDetail({ onSaved }) {
                       <thead>
                         <tr className="text-left text-xs uppercase tracking-wide text-text-muted border-b border-bg-border">
                           <th className="py-2 pr-4 font-medium">Date</th>
+                          <th className="py-2 pr-4 font-medium">End date</th>
                           <th className="py-2 pr-4 font-medium">Source</th>
                           <th className="py-2 pr-4 font-medium text-right">Price</th>
                           <th className="py-2 font-medium">Link</th>
@@ -193,6 +216,15 @@ export default function ProductDetail({ onSaved }) {
                           <tr key={p.id} className="border-b border-bg-border/60">
                             <td className="py-2.5 pr-4 tabular-nums text-text-secondary">
                               {p.date ? formatDateShort(p.date) : '—'}
+                            </td>
+                            <td className="py-2.5 pr-4">
+                              <input
+                                type="date"
+                                className={inputClass}
+                                value={p.endDate || ''}
+                                aria-label="End date"
+                                onChange={(e) => handleEndDateChange(p.id, e.target.value)}
+                              />
                             </td>
                             <td className="py-2.5 pr-4 text-text-primary">{p.label || '—'}</td>
                             <td className="py-2.5 pr-4 text-right tabular-money text-expense">
@@ -255,12 +287,14 @@ function AttachPurchaseModal({ open, onClose, productId, onAttached }) {
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
   const [price, setPrice] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setSelected(null);
     setPrice('');
+    setEndDate('');
     setPage(1);
     setQuery('');
     setLinkType('transaction');
@@ -306,6 +340,7 @@ function AttachPurchaseModal({ open, onClose, productId, onAttached }) {
         payload.receiptItemId = selected.id;
         if (price) payload.price = Number(price);
       }
+      if (endDate) payload.endDate = endDate;
       await createProductItem(payload);
       onAttached?.();
     } catch (err) {
@@ -428,6 +463,17 @@ function AttachPurchaseModal({ open, onClose, productId, onAttached }) {
               value={price}
               onChange={(e) => setPrice(e.target.value)}
               required
+            />
+          </Field>
+        )}
+
+        {selected && (
+          <Field label="End date (optional)">
+            <input
+              className={inputClass}
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
             />
           </Field>
         )}

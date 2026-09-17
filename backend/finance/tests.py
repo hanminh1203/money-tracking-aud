@@ -5,8 +5,17 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 
-from finance.db_reader import ReaderError, get_dashboard_data, get_product_detail, get_products, get_transaction
-from finance.db_sync import sync_from_sheets
+from finance.db_reader import (
+    ReaderError,
+    get_dashboard_data,
+    get_export_payload,
+    get_metadata,
+    get_product_detail,
+    get_products,
+    get_transaction,
+)
+from finance.db_sync import SyncError, compare_mirror, sync_from_sheets
+from finance.db_writer import save_product_item, update_product_item
 from finance.models import (
     Category,
     Giftcard,
@@ -21,34 +30,59 @@ from finance.models import (
 from finance.sheets_client import SheetsClient, SheetsError
 
 
+def sheet_mirror(**overrides):
+    """Minimal Sheets payload for sync/compare tests, including lookups."""
+    payload = {
+        'transactions': [],
+        'receipts': [],
+        'receipt_items': [],
+        'giftcards': [],
+        'products': [],
+        'product_items': [],
+        'categories': [
+            {
+                'Main Category': 'Earnings',
+                'Sub category': 'Salary',
+                'Type': 'Income',
+            }
+        ],
+        'sources': [{'Name': 'Everyday', 'Type': 'Bank'}],
+    }
+    payload.update(overrides)
+    return payload
+
+
 class DashboardDataTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(email='dash@example.com')
         self.other = User.objects.create(email='other@example.com')
-        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
         self.salary = Category.objects.create(
+            user=self.user,
             main_category='Earnings',
             sub_category='Salary',
             type='Income',
         )
         self.groceries = Category.objects.create(
+            user=self.user,
             main_category='Living',
             sub_category='Groceries',
             type='Expense',
         )
         self.rent = Category.objects.create(
+            user=self.user,
             main_category='Living',
             sub_category='Rent',
             type='Expense',
         )
 
-    def add_transaction(self, row, value, amount, category=None, comment='', user=None):
+    def add_transaction(self, row, value, amount, category=None, comment='', user=None, source=None):
         return Transaction.objects.create(
             user=user or self.user,
             row_number=row,
             date=value,
             change=Decimal(amount),
-            source=self.source,
+            source=source or self.source,
             category=category,
             comment=comment,
         )
@@ -64,8 +98,20 @@ class DashboardDataTests(TestCase):
         self.add_transaction(7, date(2026, 1, 8), '-75.00', self.groceries)
         self.add_transaction(8, date(2026, 1, 9), '-25.00', None, 'Transfer')
         # Other user's data must not affect this dashboard.
+        other_source = Source.objects.create(user=self.other, name='Everyday', type='Bank')
+        other_salary = Category.objects.create(
+            user=self.other,
+            main_category='Earnings',
+            sub_category='Salary',
+            type='Income',
+        )
         self.add_transaction(
-            1, date(2026, 1, 5), '9999.00', self.salary, user=self.other
+            1,
+            date(2026, 1, 5),
+            '9999.00',
+            other_salary,
+            user=self.other,
+            source=other_source,
         )
 
         data = get_dashboard_data(user=self.user)
@@ -159,12 +205,53 @@ class DashboardApiTests(TestCase):
         get_data.assert_called_once_with(user=user)
 
 
+class MetadataIsolationTests(TestCase):
+    def test_get_metadata_only_returns_current_user_rows(self):
+        user = User.objects.create(email='meta@example.com')
+        other = User.objects.create(email='other-meta@example.com')
+        Source.objects.create(user=user, name='Mine', type='Bank')
+        Source.objects.create(user=other, name='Theirs', type='Bank')
+        Category.objects.create(
+            user=user,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        Category.objects.create(
+            user=other,
+            main_category='Living',
+            sub_category='Rent',
+            type='Expense',
+        )
+
+        data = get_metadata(user=user)
+
+        self.assertEqual([s['name'] for s in data['sources']], ['Mine'])
+        self.assertEqual([c['subCategory'] for c in data['categories']], ['Groceries'])
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_metadata_api_returns_current_user_rows(self, _access_token, get_user):
+        user = User.objects.create(email='meta-api@example.com')
+        other = User.objects.create(email='other-meta-api@example.com')
+        get_user.return_value = user
+        Source.objects.create(user=user, name='Mine', type='Cash')
+        Source.objects.create(user=other, name='Theirs', type='Cash')
+
+        response = self.client.get('/api/metadata')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['sources'], [{'name': 'Mine', 'type': 'Cash'}])
+        self.assertEqual(response.json()['categories'], [])
+
+
 class SyncIsolationTests(TestCase):
     def setUp(self):
         self.user_a = User.objects.create(email='a@example.com', sheet_id='sheet-a')
         self.user_b = User.objects.create(email='b@example.com', sheet_id='sheet-b')
-        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.source = Source.objects.create(user=self.user_b, name='Everyday', type='Bank')
         self.salary = Category.objects.create(
+            user=self.user_b,
             main_category='Earnings',
             sub_category='Salary',
             type='Income',
@@ -187,8 +274,8 @@ class SyncIsolationTests(TestCase):
 
     def test_sync_only_replaces_current_user_rows(self):
         client = MagicMock()
-        client.get_mirror_source_rows.return_value = {
-            'transactions': [
+        client.get_mirror_source_rows.return_value = sheet_mirror(
+            transactions=[
                 {
                     '__sheet_row': 2,
                     'Transaction ID': 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
@@ -201,25 +288,53 @@ class SyncIsolationTests(TestCase):
                     'Giftcard ID': '',
                 }
             ],
-            'receipts': [],
-            'receipt_items': [],
-            'giftcards': [],
-            'products': [],
-            'product_items': [],
-        }
+        )
 
         result = sync_from_sheets(client, user=self.user_a)
 
         self.assertTrue(result['ok'])
         self.assertEqual(result['inserted']['transactions'], 1)
+        self.assertEqual(result['inserted']['sources'], 1)
+        self.assertEqual(result['inserted']['category'], 1)
         self.assertEqual(Transaction.objects.filter(user=self.user_a).count(), 1)
         self.assertEqual(Transaction.objects.filter(user=self.user_b).count(), 1)
         self.assertEqual(Giftcard.objects.filter(user=self.user_b).count(), 1)
-        self.assertEqual(Source.objects.count(), 1)
-        self.assertEqual(Category.objects.count(), 1)
+        self.assertEqual(Source.objects.filter(user=self.user_a).count(), 1)
+        self.assertEqual(Source.objects.filter(user=self.user_b).count(), 1)
+        self.assertEqual(Category.objects.filter(user=self.user_a).count(), 1)
+        self.assertEqual(Category.objects.filter(user=self.user_b).count(), 1)
         synced = Transaction.objects.get(user=self.user_a)
         self.assertEqual(
             str(synced.id), 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+        )
+        self.assertEqual(synced.source.user_id, self.user_a.id)
+        self.assertEqual(synced.category.user_id, self.user_a.id)
+
+    def test_sync_replaces_current_user_sources_and_categories(self):
+        Source.objects.create(user=self.user_a, name='Old Source', type='Bank')
+        Category.objects.create(
+            user=self.user_a,
+            main_category='Old',
+            sub_category='Stale',
+            type='Expense',
+        )
+        client = MagicMock()
+        client.get_mirror_source_rows.return_value = sheet_mirror()
+
+        result = sync_from_sheets(client, user=self.user_a)
+
+        self.assertTrue(result['ok'])
+        self.assertFalse(Source.objects.filter(user=self.user_a, name='Old Source').exists())
+        self.assertTrue(Source.objects.filter(user=self.user_a, name='Everyday').exists())
+        self.assertFalse(
+            Category.objects.filter(user=self.user_a, sub_category='Stale').exists()
+        )
+        self.assertTrue(
+            Category.objects.filter(user=self.user_a, sub_category='Salary').exists()
+        )
+        self.assertTrue(Source.objects.filter(user=self.user_b, name='Everyday').exists())
+        self.assertTrue(
+            Category.objects.filter(user=self.user_b, sub_category='Salary').exists()
         )
 
     def test_sync_product_item_links_by_transaction_id(self):
@@ -227,8 +342,8 @@ class SyncIsolationTests(TestCase):
         product_id = uuid.UUID('c3d4e5f6-a7b8-9012-cdef-123456789012')
         product_item_id = uuid.UUID('d4e5f6a7-b8c9-0123-def0-234567890123')
         client = MagicMock()
-        client.get_mirror_source_rows.return_value = {
-            'transactions': [
+        client.get_mirror_source_rows.return_value = sheet_mirror(
+            transactions=[
                 {
                     '__sheet_row': 2,
                     'Transaction ID': str(tx_id),
@@ -241,13 +356,10 @@ class SyncIsolationTests(TestCase):
                     'Giftcard ID': '',
                 }
             ],
-            'receipts': [],
-            'receipt_items': [],
-            'giftcards': [],
-            'products': [
+            products=[
                 {'Product ID': str(product_id), 'Name': 'Milk'},
             ],
-            'product_items': [
+            product_items=[
                 {
                     'Product Item ID': str(product_item_id),
                     'Product ID': str(product_id),
@@ -256,7 +368,7 @@ class SyncIsolationTests(TestCase):
                     'Receipt Item ID': '',
                 }
             ],
-        }
+        )
 
         result = sync_from_sheets(client, user=self.user_a)
 
@@ -264,14 +376,129 @@ class SyncIsolationTests(TestCase):
         pi = ProductItem.objects.get(user=self.user_a, id=product_item_id)
         self.assertEqual(pi.transaction_id, tx_id)
         self.assertEqual(pi.price, Decimal('12.50'))
+        self.assertIsNone(pi.end_date)
+
+    def test_sync_product_item_with_and_without_end_date(self):
+        tx_id = uuid.UUID('b2c3d4e5-f6a7-8901-bcde-f12345678901')
+        product_id = uuid.UUID('c3d4e5f6-a7b8-9012-cdef-123456789012')
+        with_end_id = uuid.UUID('d4e5f6a7-b8c9-0123-def0-234567890123')
+        without_end_id = uuid.UUID('e5f6a7b8-c9d0-1234-ef01-345678901234')
+        tx2_id = uuid.UUID('f6a7b8c9-d0e1-2345-f012-456789012345')
+        source = sheet_mirror(
+            transactions=[
+                {
+                    '__sheet_row': 2,
+                    'Transaction ID': str(tx_id),
+                    'Date': '2026-01-10',
+                    'Change': '-25',
+                    'Source': 'Everyday',
+                    'Comment': 'Shop',
+                    'Sub category': 'Salary',
+                    'Receipt ID': '',
+                    'Giftcard ID': '',
+                },
+                {
+                    '__sheet_row': 3,
+                    'Transaction ID': str(tx2_id),
+                    'Date': '2026-01-20',
+                    'Change': '-8',
+                    'Source': 'Everyday',
+                    'Comment': 'Shop',
+                    'Sub category': 'Salary',
+                    'Receipt ID': '',
+                    'Giftcard ID': '',
+                },
+            ],
+            products=[
+                {'Product ID': str(product_id), 'Name': 'Milk'},
+            ],
+            product_items=[
+                {
+                    'Product Item ID': str(with_end_id),
+                    'Product ID': str(product_id),
+                    'Price': '12.50',
+                    'Transaction ID': str(tx_id),
+                    'Receipt Item ID': '',
+                    'End Date': '15/03/2026',
+                },
+                {
+                    'Product Item ID': str(without_end_id),
+                    'Product ID': str(product_id),
+                    'Price': '8.00',
+                    'Transaction ID': str(tx2_id),
+                    'Receipt Item ID': '',
+                    'End Date': '',
+                },
+            ],
+        )
+        client = MagicMock()
+        client.get_mirror_source_rows.return_value = source
+
+        result = sync_from_sheets(client, user=self.user_a)
+
+        self.assertTrue(result['ok'])
+        with_end = ProductItem.objects.get(user=self.user_a, id=with_end_id)
+        without_end = ProductItem.objects.get(user=self.user_a, id=without_end_id)
+        self.assertEqual(with_end.end_date, date(2026, 3, 15))
+        self.assertIsNone(without_end.end_date)
+
+        comparison = compare_mirror(client, user=self.user_a)
+        self.assertTrue(comparison['matched'])
+        self.assertTrue(comparison['tables']['product_items']['matched'])
+        self.assertTrue(comparison['tables']['category']['matched'])
+        self.assertTrue(comparison['tables']['sources']['matched'])
+
+        without_end.end_date = date(2026, 4, 1)
+        without_end.save(update_fields=['end_date'])
+        drifted = compare_mirror(client, user=self.user_a)
+        self.assertFalse(drifted['matched'])
+        self.assertFalse(drifted['tables']['product_items']['matched'])
+
+    def test_sync_rejects_invalid_end_date(self):
+        tx_id = uuid.UUID('b2c3d4e5-f6a7-8901-bcde-f12345678901')
+        product_id = uuid.UUID('c3d4e5f6-a7b8-9012-cdef-123456789012')
+        product_item_id = uuid.UUID('d4e5f6a7-b8c9-0123-def0-234567890123')
+        client = MagicMock()
+        client.get_mirror_source_rows.return_value = sheet_mirror(
+            transactions=[
+                {
+                    '__sheet_row': 2,
+                    'Transaction ID': str(tx_id),
+                    'Date': '2026-01-10',
+                    'Change': '-25',
+                    'Source': 'Everyday',
+                    'Comment': 'Shop',
+                    'Sub category': 'Salary',
+                    'Receipt ID': '',
+                    'Giftcard ID': '',
+                }
+            ],
+            products=[
+                {'Product ID': str(product_id), 'Name': 'Milk'},
+            ],
+            product_items=[
+                {
+                    'Product Item ID': str(product_item_id),
+                    'Product ID': str(product_id),
+                    'Price': '12.50',
+                    'Transaction ID': str(tx_id),
+                    'Receipt Item ID': '',
+                    'End Date': 'not-a-date',
+                }
+            ],
+        )
+        with self.assertRaises(SyncError) as ctx:
+            sync_from_sheets(client, user=self.user_a)
+        self.assertIn('Invalid date', str(ctx.exception))
 
 
 class TransactionDetailTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(email='detail@example.com')
         self.other = User.objects.create(email='other-detail@example.com')
-        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
         self.groceries = Category.objects.create(
+            user=self.user,
             main_category='Living',
             sub_category='Groceries',
             type='Expense',
@@ -417,11 +644,12 @@ class TransactionDetailTests(TestCase):
 
         tx = self.add_transaction()
         salary = Category.objects.create(
+            user=self.user,
             main_category='Earnings',
             sub_category='Salary',
             type='Income',
         )
-        savings = Source.objects.create(name='Savings', type='Bank')
+        savings = Source.objects.create(user=self.user, name='Savings', type='Bank')
 
         update_transaction_detail(
             user=self.user,
@@ -593,8 +821,9 @@ class TransactionDetailTests(TestCase):
 class ProductTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(email='products@example.com')
-        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
         self.groceries = Category.objects.create(
+            user=self.user,
             main_category='Living',
             sub_category='Groceries',
             type='Expense',
@@ -695,3 +924,177 @@ class ProductTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         client.add_product.assert_called_once_with(name='Shampoo')
+
+    def test_save_and_update_product_item_end_date(self):
+        tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
+        item_id = uuid.uuid4()
+        save_product_item(
+            user=self.user,
+            product_item_id=item_id,
+            product_id=self.product.id,
+            price='8.50',
+            transaction_id=tx.id,
+        )
+        created = ProductItem.objects.get(pk=item_id)
+        self.assertIsNone(created.end_date)
+
+        update_product_item(user=self.user, product_item_id=item_id, end_date='2026-02-28')
+        created.refresh_from_db()
+        self.assertEqual(created.end_date, date(2026, 2, 28))
+
+        update_product_item(user=self.user, product_item_id=item_id, end_date='')
+        created.refresh_from_db()
+        self.assertIsNone(created.end_date)
+
+        with_end_id = uuid.uuid4()
+        tx2 = self.add_transaction(2, date(2026, 1, 10), '-9.00')
+        save_product_item(
+            user=self.user,
+            product_item_id=with_end_id,
+            product_id=self.product.id,
+            price='9.00',
+            transaction_id=tx2.id,
+            end_date='28/02/2026',
+        )
+        self.assertEqual(
+            ProductItem.objects.get(pk=with_end_id).end_date, date(2026, 2, 28)
+        )
+
+    def test_product_detail_and_transaction_include_end_date(self):
+        tx = self.add_transaction(1, date(2026, 1, 10), '-5.00', comment='Coles : paste')
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx,
+            price=Decimal('5.00'),
+            end_date=date(2026, 3, 1),
+        )
+
+        detail = get_product_detail(user=self.user, product_id=str(self.product.id))
+        self.assertEqual(detail['purchases'][0]['endDate'], '2026-03-01')
+
+        data = get_transaction(user=self.user, transaction_id=str(tx.id))
+        self.assertEqual(data['products'][0]['endDate'], '2026-03-01')
+
+        export = get_export_payload(user=self.user)
+        self.assertEqual(
+            export['product_items']['columns'][-1],
+            'End Date',
+        )
+        self.assertEqual(export['product_items']['rows'][0][-1], '2026-03-01')
+
+    def test_receipt_item_product_includes_end_date(self):
+        receipt = Receipt.objects.create(
+            user=self.user, date=date(2026, 1, 8), total=Decimal('8.50')
+        )
+        item = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Paste',
+            amount=Decimal('1'),
+            unit='tube',
+            money=Decimal('8.50'),
+        )
+        Transaction.objects.create(
+            user=self.user,
+            row_number=9,
+            date=date(2026, 1, 8),
+            change=Decimal('-8.50'),
+            source=self.source,
+            category=self.groceries,
+            receipt=receipt,
+        )
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            receipt_item=item,
+            end_date=date(2026, 5, 1),
+        )
+        data = get_transaction(
+            user=self.user,
+            transaction_id=str(Transaction.objects.get(user=self.user, receipt=receipt).id),
+        )
+        linked = data['receipt']['items'][0]
+        self.assertEqual(linked['productId'], str(self.product.id))
+        self.assertEqual(linked['endDate'], '2026-05-01')
+
+    def test_product_item_xor_still_enforced_with_end_date(self):
+        tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
+        receipt = Receipt.objects.create(
+            user=self.user, date=date(2026, 1, 1), total=Decimal('8.50')
+        )
+        item = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Paste',
+            amount=Decimal('1'),
+            unit='tube',
+            money=Decimal('8.50'),
+        )
+        with self.assertRaises(Exception):
+            ProductItem.objects.create(
+                user=self.user,
+                product=self.product,
+                transaction=tx,
+                receipt_item=item,
+                price=Decimal('8.50'),
+                end_date=date(2026, 4, 1),
+            )
+
+    @patch('finance.api_views.sheets_for')
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_create_product_item_api_passes_end_date(
+        self, _access_token, get_user, sheets_for
+    ):
+        get_user.return_value = self.user
+        client = MagicMock()
+        client.add_product_item.return_value = {
+            'productItemId': 'pi-1',
+            'endDate': '2026-03-01',
+        }
+        sheets_for.return_value = client
+
+        response = self.client.post(
+            '/api/product-items',
+            data={
+                'productId': str(self.product.id),
+                'transactionId': 'tx-1',
+                'price': 8.5,
+                'endDate': '2026-03-01',
+            },
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        client.add_product_item.assert_called_once_with(
+            product_id=str(self.product.id),
+            transaction_id='tx-1',
+            receipt_item_id=None,
+            price=8.5,
+            end_date='2026-03-01',
+        )
+
+    @patch('finance.api_views.sheets_for')
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_update_product_item_api_passes_end_date(
+        self, _access_token, get_user, sheets_for
+    ):
+        get_user.return_value = self.user
+        client = MagicMock()
+        client.update_product_item.return_value = {
+            'productItemId': 'pi-1',
+            'endDate': None,
+        }
+        sheets_for.return_value = client
+
+        response = self.client.put(
+            '/api/product-items/pi-1',
+            data={'endDate': None},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        client.update_product_item.assert_called_once_with(
+            product_item_id='pi-1',
+            end_date=None,
+        )
