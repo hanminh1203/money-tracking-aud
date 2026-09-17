@@ -3,11 +3,27 @@ import Card from '../components/Card';
 import PageHeader, { PageActions } from '../components/PageHeader';
 import { fetchHealth } from '../lib/api';
 
+function sheetUrl(spreadsheetId) {
+  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+}
+
 const SERVICES = [
   {
     key: 'google_sheet',
     name: 'Google Sheet',
-    details: (check) => (check?.title ? [{ label: 'Spreadsheet', value: check.title }] : []),
+    details: (check) => {
+      if (!check?.ok || !check?.spreadsheet_id) return [];
+      const items = [];
+      if (check.title) {
+        items.push({ label: 'Spreadsheet', value: check.title });
+      }
+      items.push({
+        label: 'Link',
+        value: 'Open in Google Sheets',
+        href: sheetUrl(check.spreadsheet_id),
+      });
+      return items;
+    },
   },
   {
     key: 'database',
@@ -145,11 +161,22 @@ function CheckCard({ name, check, checking, details }) {
           <p className="text-xs text-text-muted">Response time: {check.latency_ms} ms</p>
         )}
         {!checking &&
-          details?.map(({ label, value }) =>
+          details?.map(({ label, value, href }) =>
             value ? (
               <div key={label} className="text-sm">
                 <span className="text-text-muted">{label}: </span>
-                <span className="text-text-primary">{value}</span>
+                {href ? (
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-text-primary underline font-medium"
+                  >
+                    {value}
+                  </a>
+                ) : (
+                  <span className="text-text-primary">{value}</span>
+                )}
               </div>
             ) : null
           )}

@@ -208,7 +208,6 @@ def save_transaction_bundle(
     transaction_id: Any = None,
     comment: str = '',
     sub_category: str = '',
-    receipt_id: Any = None,
     payments: list[dict] | None = None,
     giftcard_payments: list[dict] | None = None,
     giftcard_debits: list[dict] | None = None,
@@ -231,7 +230,6 @@ def save_transaction_bundle(
                 change=signed_change,
                 comment=str(comment or ''),
                 category_id=_resolve_category_id(sub_category or ''),
-                receipt_id=uuid.UUID(str(receipt_id)) if receipt_id else None,
             )
             _create_payments(
                 owner=owner,
@@ -259,7 +257,6 @@ def save_transactions(
             transaction_id=row.get('transaction_id'),
             comment=str(row.get('comment') or ''),
             sub_category=str(row.get('sub_category') or ''),
-            receipt_id=row.get('receipt_id'),
             payments=row.get('payments') or [],
             giftcard_payments=row.get('giftcard_payments') or [],
         )
@@ -274,7 +271,6 @@ def save_transaction(
     transaction_id: Any = None,
     comment: str = '',
     sub_category: str = '',
-    receipt_id: Any = None,
     payments: list[dict] | None = None,
     giftcard_payments: list[dict] | None = None,
     source: str | None = None,
@@ -293,7 +289,6 @@ def save_transaction(
         transaction_id=transaction_id,
         comment=comment,
         sub_category=sub_category,
-        receipt_id=receipt_id,
         payments=payment_rows,
         giftcard_payments=giftcard_rows,
     )
@@ -311,26 +306,13 @@ def save_receipt_bundle(
     giftcard_payments: list[dict] | None = None,
     giftcard_debits: list[dict] | None = None,
 ) -> None:
-    """Insert Receipt + ReceiptItems + one linked Transaction with funding rows."""
+    """Insert one Transaction with funding rows, then Receipt + ReceiptItems."""
     owner = _require_user(user)
     try:
         rid = uuid.UUID(str(receipt_id))
         signed_total = -abs(_dec(total))
         validate_funding(signed_total, payments, giftcard_payments)
         with db_transaction.atomic():
-            Receipt.objects.create(
-                id=rid,
-                version=1,
-                user=owner,
-                date=_parse_date(date),
-                total=_dec(total),
-            )
-            ReceiptItem.objects.bulk_create(
-                [
-                    ReceiptItem(**_receipt_item_kwargs(owner=owner, receipt_id=rid, it=it))
-                    for it in items
-                ]
-            )
             tid = _resolve_transaction_id(transaction)
             Transaction.objects.create(
                 id=tid,
@@ -341,13 +323,26 @@ def save_receipt_bundle(
                 change=signed_total,
                 comment=str(transaction.get('comment') or ''),
                 category_id=_resolve_category_id(transaction.get('sub_category') or ''),
-                receipt_id=rid,
             )
             _create_payments(
                 owner=owner,
                 transaction_id=tid,
                 payments=payments,
                 giftcard_payments=list(giftcard_payments or []),
+            )
+            Receipt.objects.create(
+                id=rid,
+                version=1,
+                user=owner,
+                transaction_id=tid,
+                date=_parse_date(date),
+                total=_dec(total),
+            )
+            ReceiptItem.objects.bulk_create(
+                [
+                    ReceiptItem(**_receipt_item_kwargs(owner=owner, receipt_id=rid, it=it))
+                    for it in items
+                ]
             )
             _apply_giftcard_balance_updates(owner=owner, giftcard_debits=giftcard_debits)
     except Exception:
@@ -493,10 +488,13 @@ def update_transaction_detail(
                 giftcard_payments=giftcard_rows,
             )
 
-            if transaction.receipt_id:
+            try:
                 receipt = Receipt.objects.select_for_update().get(
-                    pk=transaction.receipt_id, user=owner
+                    transaction=transaction, user=owner
                 )
+            except Receipt.DoesNotExist:
+                receipt = None
+            if receipt is not None:
                 receipt.date = transaction.date
                 if receipt_total is not None:
                     receipt.total = _dec(receipt_total)

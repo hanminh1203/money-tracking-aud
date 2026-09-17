@@ -38,6 +38,12 @@ class Receipt(AuditedModel):
         related_name='receipts',
         db_column='user_id',
     )
+    transaction = models.OneToOneField(
+        'Transaction',
+        on_delete=models.CASCADE,
+        related_name='receipt',
+        db_column='transaction_id',
+    )
     date = models.DateField()
     total = models.DecimalField(max_digits=14, decimal_places=2)
 
@@ -216,14 +222,6 @@ class Transaction(AuditedModel):
         blank=True,
         related_name='transactions',
         db_column='category_id',
-    )
-    receipt = models.ForeignKey(
-        Receipt,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='transactions',
-        db_column='receipt_id',
     )
 
     class Meta:

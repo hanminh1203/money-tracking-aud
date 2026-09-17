@@ -32,7 +32,6 @@ TRANSACTION_HEADERS = [
     'Change',
     'Comment',
     'Sub category',
-    'Receipt ID',
 ]
 PAYMENT_EXPORT_COLUMNS = ['Payment ID', 'Transaction ID', 'Source', 'Amount']
 GIFTCARD_PAYMENT_EXPORT_COLUMNS = [
@@ -44,7 +43,7 @@ GIFTCARD_PAYMENT_EXPORT_COLUMNS = [
 
 CATEGORY_EXPORT_COLUMNS = ['Main Category', 'Sub category', 'Type']
 SOURCES_EXPORT_COLUMNS = ['Name', 'Type']
-RECEIPT_EXPORT_COLUMNS = ['Receipt ID', 'Date', 'Total']
+RECEIPT_EXPORT_COLUMNS = ['Receipt ID', 'Transaction ID', 'Date', 'Total']
 RECEIPT_ITEM_EXPORT_COLUMNS = [
     'Receipt Item ID',
     'Receipt ID',
@@ -109,8 +108,16 @@ def _sources_summary(tx: Transaction) -> str:
     return ' + '.join(parts)
 
 
+def _linked_receipt(tx: Transaction) -> Receipt | None:
+    try:
+        return tx.receipt
+    except Receipt.DoesNotExist:
+        return None
+
+
 def _tx_row(tx: Transaction) -> dict:
     summary = _sources_summary(tx)
+    receipt = _linked_receipt(tx)
     return {
         'id': str(tx.id),
         'Date': tx.date.isoformat(),
@@ -118,18 +125,19 @@ def _tx_row(tx: Transaction) -> dict:
         'Source': summary,
         'Comment': tx.comment,
         'Sub category': tx.category.sub_category if tx.category_id else '',
-        'Receipt ID': str(tx.receipt_id) if tx.receipt_id else None,
         'Creation Date': tx.creation_date.isoformat() if tx.creation_date else None,
         '__row': tx.row_number,
         'payments': _payment_payloads(tx),
         'giftcardPayments': _giftcard_payment_payloads(tx),
         'sourcesSummary': summary,
+        'receiptId': str(receipt.id) if receipt else None,
     }
 
 
 def _dashboard_tx_row(tx: Transaction) -> dict:
     """Return a transaction already shaped for the dashboard UI."""
     summary = _sources_summary(tx)
+    receipt = _linked_receipt(tx)
     return {
         'id': str(tx.id),
         'row': tx.row_number,
@@ -144,7 +152,7 @@ def _dashboard_tx_row(tx: Transaction) -> dict:
         'subCategory': tx.category.sub_category if tx.category_id else '',
         'mainCategory': tx.category.main_category if tx.category_id else '',
         'type': tx.category.type if tx.category_id else '',
-        'receiptId': str(tx.receipt_id) if tx.receipt_id else None,
+        'receiptId': str(receipt.id) if receipt else None,
     }
 
 
@@ -359,11 +367,11 @@ def get_receipt(*, user: User, receipt_id: str) -> dict:
     try:
         receipt = (
             Receipt.objects.filter(user=user)
+            .select_related('transaction', 'transaction__category')
             .prefetch_related(
                 'items',
-                'transactions__payments__source',
-                'transactions__giftcard_payments__giftcard',
-                'transactions__category',
+                'transaction__payments__source',
+                'transaction__giftcard_payments__giftcard',
             )
             .get(pk=rid)
         )
@@ -376,26 +384,25 @@ def get_receipt(*, user: User, receipt_id: str) -> dict:
     store = ''
     comment = ''
     sub_category = ''
-    for tx in receipt.transactions.all():
-        for payment in tx.payments.all():
-            sources.append(
-                {
-                    'source': payment.source.name if payment.source_id else '',
-                    'amount': _dec_to_number(payment.amount),
-                }
-            )
-        for gp in tx.giftcard_payments.all():
-            sources.append(
-                {
-                    'source': gp.giftcard.shop if gp.giftcard_id else 'Giftcard',
-                    'amount': _dec_to_number(gp.amount),
-                    'giftcardId': str(gp.giftcard_id),
-                }
-            )
-        if not sub_category and tx.category_id:
-            sub_category = (tx.category.sub_category or '').strip()
-        if not store and not comment:
-            store, comment = parse_store_comment(tx.comment or '')
+    tx = receipt.transaction
+    for payment in tx.payments.all():
+        sources.append(
+            {
+                'source': payment.source.name if payment.source_id else '',
+                'amount': _dec_to_number(payment.amount),
+            }
+        )
+    for gp in tx.giftcard_payments.all():
+        sources.append(
+            {
+                'source': gp.giftcard.shop if gp.giftcard_id else 'Giftcard',
+                'amount': _dec_to_number(gp.amount),
+                'giftcardId': str(gp.giftcard_id),
+            }
+        )
+    if tx.category_id:
+        sub_category = (tx.category.sub_category or '').strip()
+    store, comment = parse_store_comment(tx.comment or '')
 
     return {
         'receiptId': rid,
@@ -425,11 +432,12 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
         raise ReaderError('Transaction not found', status=404) from exc
 
     data = _dashboard_tx_row(tx)
-    if tx.receipt_id and tx.receipt:
+    receipt = _linked_receipt(tx)
+    if receipt:
         data['receipt'] = {
-            'receiptId': str(tx.receipt.id),
-            'date': tx.receipt.date.isoformat(),
-            'total': _dec_to_number(tx.receipt.total),
+            'receiptId': str(receipt.id),
+            'date': receipt.date.isoformat(),
+            'total': _dec_to_number(receipt.total),
             'sources': [
                 {
                     'source': payment.source.name if payment.source_id else '',
@@ -445,7 +453,7 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
                 }
                 for gp in tx.giftcard_payments.all()
             ],
-            'items': _receipt_items(tx.receipt, user=user),
+            'items': _receipt_items(receipt, user=user),
         }
     else:
         data['receipt'] = None
@@ -725,7 +733,6 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
             _dec_cell(tx.change),
             tx.comment or '',
             tx.category.sub_category if tx.category_id else '',
-            str(tx.receipt_id) if tx.receipt_id else '',
         ]
         for tx in Transaction.objects.filter(user=user)
         .select_related('category')
@@ -769,7 +776,12 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
     ]
 
     receipts = [
-        [str(r.id), r.date.isoformat(), _dec_cell(r.total)]
+        [
+            str(r.id),
+            str(r.transaction_id),
+            r.date.isoformat(),
+            _dec_cell(r.total),
+        ]
         for r in Receipt.objects.filter(user=user).order_by('id').iterator()
     ]
 

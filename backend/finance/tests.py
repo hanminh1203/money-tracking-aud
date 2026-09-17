@@ -213,7 +213,6 @@ class SyncIsolationTests(TestCase):
                     'Change': '100',
                     'Comment': 'Pay',
                     'Sub category': 'Salary',
-                    'Receipt ID': '',
                 }
             ],
             'payments': [
@@ -261,7 +260,6 @@ class SyncIsolationTests(TestCase):
                     'Change': '-25',
                     'Comment': 'Shop',
                     'Sub category': 'Salary',
-                    'Receipt ID': '',
                 }
             ],
             'payments': [
@@ -348,8 +346,10 @@ class TransactionDetailTests(TestCase):
         self.assertIsNone(data['receipt'])
 
     def test_get_transaction_with_receipt_items(self):
+        tx = self.add_transaction()
         receipt = Receipt.objects.create(
             user=self.user,
+            transaction=tx,
             date=date(2026, 1, 8),
             total=Decimal('12.50'),
         )
@@ -369,7 +369,6 @@ class TransactionDetailTests(TestCase):
             unit='loaf',
             money=Decimal('8.00'),
         )
-        tx = self.add_transaction(receipt=receipt)
 
         data = get_transaction(user=self.user, transaction_id=str(tx.id))
 
@@ -487,8 +486,10 @@ class TransactionDetailTests(TestCase):
     def test_update_transaction_detail_replaces_receipt_items(self):
         from finance.db_writer import update_transaction_detail
 
+        tx = self.add_transaction()
         receipt = Receipt.objects.create(
             user=self.user,
+            transaction=tx,
             date=date(2026, 1, 8),
             total=Decimal('12.50'),
         )
@@ -500,7 +501,6 @@ class TransactionDetailTests(TestCase):
             unit='L',
             money=Decimal('4.50'),
         )
-        tx = self.add_transaction(receipt=receipt)
 
         update_transaction_detail(
             user=self.user,
@@ -573,12 +573,13 @@ class TransactionDetailTests(TestCase):
         self.assertEqual(response.status_code, 401)
 
     def test_update_requires_items_when_receipt_linked(self):
-        receipt = Receipt.objects.create(
+        tx = self.add_transaction()
+        Receipt.objects.create(
             user=self.user,
+            transaction=tx,
             date=date(2026, 1, 8),
             total=Decimal('12.50'),
         )
-        tx = self.add_transaction(receipt=receipt)
         client = SheetsClient('token', 'sheet-id', user=self.user)
 
         with self.assertRaises(SheetsError) as ctx:
@@ -594,12 +595,13 @@ class TransactionDetailTests(TestCase):
         self.assertIn('items are required', str(ctx.exception))
 
     def test_update_rejects_item_total_mismatch(self):
-        receipt = Receipt.objects.create(
+        tx = self.add_transaction()
+        Receipt.objects.create(
             user=self.user,
+            transaction=tx,
             date=date(2026, 1, 8),
             total=Decimal('12.50'),
         )
-        tx = self.add_transaction(receipt=receipt)
         client = SheetsClient('token', 'sheet-id', user=self.user)
 
         with self.assertRaises(SheetsError) as ctx:
@@ -674,7 +676,13 @@ class ProductTests(TestCase):
 
     def test_product_item_xor_link_constraint(self):
         tx = self.add_transaction(1, date(2026, 1, 1), '-8.50')
-        receipt = Receipt.objects.create(user=self.user, date=date(2026, 1, 1), total=Decimal('8.50'))
+        receipt_tx = self.add_transaction(3, date(2026, 1, 1), '-8.50')
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=receipt_tx,
+            date=date(2026, 1, 1),
+            total=Decimal('8.50'),
+        )
         item = ReceiptItem.objects.create(
             user=self.user,
             receipt=receipt,

@@ -22,7 +22,6 @@ INPUT_COLUMNS = [
     'Comment',
     'Sub category',
 ]
-RECEIPT_TX_COLUMNS = INPUT_COLUMNS + ['Receipt ID']
 PAYMENT_COLUMNS = ['Payment ID', 'Transaction ID', 'Source', 'Amount']
 GIFTCARD_PAYMENT_COLUMNS = [
     'Giftcard Payment ID',
@@ -30,7 +29,7 @@ GIFTCARD_PAYMENT_COLUMNS = [
     'Giftcard ID',
     'Amount',
 ]
-RECEIPT_COLUMNS = ['Receipt ID', 'Date', 'Total']
+RECEIPT_COLUMNS = ['Receipt ID', 'Transaction ID', 'Date', 'Total']
 RECEIPT_ITEM_COLUMNS = ['Receipt Item ID', 'Receipt ID', 'Name', 'Amount', 'Unit', 'Money']
 GIFTCARD_COLUMNS = ['Giftcard ID', 'Shop', 'Date', 'Balance']
 PRODUCT_COLUMNS = ['Product ID', 'Name']
@@ -1068,8 +1067,13 @@ class SheetsClient:
         ]
         giftcard_debits = self.plan_giftcard_debits(giftcard_rows)
 
+        tx_row_number = self.append_transaction_row(
+            [transaction_id, date, -total, comment_text, sub_category]
+        )
         self.append_rows(
-            settings.RECEIPT_TABLE, RECEIPT_COLUMNS, [[receipt_id, date, total]]
+            settings.RECEIPT_TABLE,
+            RECEIPT_COLUMNS,
+            [[receipt_id, transaction_id, date, total]],
         )
         self.append_rows(
             settings.RECEIPT_ITEMS_TABLE,
@@ -1078,9 +1082,6 @@ class SheetsClient:
                 [it['id'], receipt_id, it['name'], it['amount'], it['unit'], it['money']]
                 for it in normalized_items
             ],
-        )
-        tx_row_number = self.append_transaction_row(
-            [transaction_id, date, -total, comment_text, sub_category, receipt_id]
         )
         saved_payments, saved_giftcard_payments = self.append_funding_rows(
             transaction_id=transaction_id,
@@ -1160,9 +1161,16 @@ class SheetsClient:
         except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
             raise SheetsError('Transaction not found', status=404) from exc
 
+        from finance.models import Receipt as ReceiptModel
+
+        try:
+            linked_receipt = tx.receipt
+        except ReceiptModel.DoesNotExist:
+            linked_receipt = None
+
         normalized_items = None
         total = None
-        if tx.receipt_id:
+        if linked_receipt:
             if items is None:
                 raise SheetsError('items are required for a receipt-linked transaction')
             normalized_items = []
@@ -1231,7 +1239,7 @@ class SheetsClient:
         except ValueError as exc:
             raise SheetsError(str(exc)) from exc
 
-        if tx.receipt_id:
+        if linked_receipt:
             funding_total = round(
                 sum(s['amount'] for s in payment_rows + giftcard_rows) * 100
             ) / 100
@@ -1258,26 +1266,30 @@ class SheetsClient:
             giftcard_payments=giftcard_rows,
         )
 
-        if tx.receipt_id:
+        if linked_receipt:
             receipt_rows = self.find_matching_sheet_rows(
                 settings.RECEIPT_TABLE,
                 match_column='Receipt ID',
-                match_value=str(tx.receipt_id),
+                match_value=str(linked_receipt.id),
             )
             if not receipt_rows:
                 raise SheetsError('Receipt not found in spreadsheet')
             self.update_table_row_at(
                 settings.RECEIPT_TABLE,
                 sheet_row=receipt_rows[0],
-                values_by_column={'Date': date, 'Total': total},
+                values_by_column={
+                    'Transaction ID': tid,
+                    'Date': date,
+                    'Total': total,
+                },
             )
 
             item_rows = self.find_matching_sheet_rows(
                 settings.RECEIPT_ITEMS_TABLE,
                 match_column='Receipt ID',
-                match_value=str(tx.receipt_id),
+                match_value=str(linked_receipt.id),
             )
-            rid = str(tx.receipt_id)
+            rid = str(linked_receipt.id)
             overlapping = min(len(item_rows), len(normalized_items or []))
             for i in range(overlapping):
                 it = normalized_items[i]
@@ -1331,7 +1343,7 @@ class SheetsClient:
         return {
             'id': str(tx.id),
             'updated': 1,
-            'receiptUpdated': bool(tx.receipt_id),
+            'receiptUpdated': bool(linked_receipt),
             'items': len(normalized_items or []),
         }
 
@@ -1372,8 +1384,8 @@ class SheetsClient:
         debit_tx_id = str(uuid.uuid4())
         tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
-            RECEIPT_TX_COLUMNS,
-            [[debit_tx_id, date, -abs_amt, note, sub_category, '']],
+            INPUT_COLUMNS,
+            [[debit_tx_id, date, -abs_amt, note, sub_category]],
         )
         saved_payments, _ = self.append_funding_rows(
             transaction_id=debit_tx_id,
@@ -1447,8 +1459,8 @@ class SheetsClient:
         transaction_id = str(uuid.uuid4())
         tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
-            RECEIPT_TX_COLUMNS,
-            [[transaction_id, date, -abs_amt, note, category, '']],
+            INPUT_COLUMNS,
+            [[transaction_id, date, -abs_amt, note, category]],
         )
         _, saved_giftcard_payments = self.append_funding_rows(
             transaction_id=transaction_id,
