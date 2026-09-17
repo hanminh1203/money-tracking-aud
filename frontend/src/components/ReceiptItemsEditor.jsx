@@ -12,6 +12,7 @@ export const emptyReceiptItem = () => ({
   money: '',
   productId: '',
   productItemId: '',
+  endDate: '',
 });
 
 export function toReceiptItemForm(item) {
@@ -24,6 +25,7 @@ export function toReceiptItemForm(item) {
     money: item.money == null || item.money === '' ? '' : String(item.money),
     productId: item.productId || '',
     productItemId: item.productItemId || '',
+    endDate: item.endDate || '',
   };
 }
 
@@ -120,6 +122,16 @@ export default function ReceiptItemsEditor({ items, onChange, total, products = 
                     </option>
                   ))}
                 </select>
+              </Field>
+            )}
+            {it.id && it.productId && (
+              <Field label="End date" className="col-span-2 sm:col-span-1">
+                <input
+                  type="date"
+                  value={it.endDate || ''}
+                  onChange={(e) => updateItem(i, { endDate: e.target.value })}
+                  className={inputClass}
+                />
               </Field>
             )}
             <button

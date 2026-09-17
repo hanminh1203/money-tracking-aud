@@ -60,6 +60,7 @@ PRODUCT_ITEM_EXPORT_COLUMNS = [
     'Price',
     'Transaction ID',
     'Receipt Item ID',
+    'End Date',
 ]
 
 DEFAULT_PAGE_SIZE = 10
@@ -168,6 +169,7 @@ def _receipt_items(receipt: Receipt, *, user: User | None = None) -> list[dict]:
                 'productItemId': str(pi.id),
                 'productId': str(pi.product_id),
                 'productName': pi.product.name,
+                'endDate': pi.end_date.isoformat() if pi.end_date else None,
             }
 
     items = sorted(
@@ -216,11 +218,11 @@ def _base_queryset(*, user: User, source: str | None = None) -> QuerySet[Transac
     return qs
 
 
-def get_metadata() -> dict:
+def get_metadata(*, user: User) -> dict:
     """Return sources and categories in the same shape as Sheets get_metadata."""
     sources = [
         {'name': s.name, 'type': s.type or ''}
-        for s in Source.objects.order_by('name')
+        for s in Source.objects.filter(user=user).order_by('name')
     ]
     categories = [
         {
@@ -228,7 +230,7 @@ def get_metadata() -> dict:
             'subCategory': c.sub_category,
             'type': c.type or '',
         }
-        for c in Category.objects.order_by('main_category', 'sub_category')
+        for c in Category.objects.filter(user=user).order_by('main_category', 'sub_category')
     ]
     return {'sources': sources, 'categories': categories}
 
@@ -464,6 +466,7 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
             'productId': str(pi.product_id),
             'name': pi.product.name,
             'price': _dec_to_number(pi.price) if pi.price is not None else None,
+            'endDate': pi.end_date.isoformat() if pi.end_date else None,
         }
         for pi in ProductItem.objects.filter(user=user, transaction_id=tx.id)
         .select_related('product')
@@ -519,6 +522,7 @@ def _product_item_row(pi: ProductItem) -> dict:
     row = {
         'id': str(pi.id),
         'date': purchase_date.isoformat() if purchase_date else None,
+        'endDate': pi.end_date.isoformat() if pi.end_date else None,
         'price': _dec_to_number(_resolved_product_item_price(pi)),
         'label': _product_item_label(pi),
     }
@@ -811,6 +815,7 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
             _dec_cell(pi.price) if pi.price is not None else '',
             str(pi.transaction_id) if pi.transaction_id else '',
             str(pi.receipt_item_id) if pi.receipt_item_id else '',
+            pi.end_date.isoformat() if pi.end_date else '',
         ]
         for pi in ProductItem.objects.filter(user=user)
         .order_by('product_id', 'creation_date')
@@ -819,12 +824,14 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
 
     categories = [
         [c.main_category or '', c.sub_category or '', c.type or '']
-        for c in Category.objects.order_by('main_category', 'sub_category').iterator()
+        for c in Category.objects.filter(user=user)
+        .order_by('main_category', 'sub_category')
+        .iterator()
     ]
 
     sources = [
         [s.name or '', s.type or '']
-        for s in Source.objects.order_by('name').iterator()
+        for s in Source.objects.filter(user=user).order_by('name').iterator()
     ]
 
     return {

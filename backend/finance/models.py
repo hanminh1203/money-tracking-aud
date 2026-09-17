@@ -78,22 +78,46 @@ class ReceiptItem(AuditedModel):
 class Category(AuditedModel):
     """Mirrors Sheets Category row."""
 
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='categories',
+        db_column='user_id',
+    )
     main_category = models.CharField(max_length=256)
-    sub_category = models.CharField(max_length=256, unique=True)
+    sub_category = models.CharField(max_length=256)
     type = models.CharField(max_length=64, blank=True, default='')
 
     class Meta:
         db_table = 'category'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'sub_category'],
+                name='category_user_sub_category_uniq',
+            ),
+        ]
 
 
 class Source(AuditedModel):
     """Mirrors Sheets Sources row."""
 
-    name = models.CharField(max_length=256, unique=True)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='sources',
+        db_column='user_id',
+    )
+    name = models.CharField(max_length=256)
     type = models.CharField(max_length=64, blank=True, default='')
 
     class Meta:
         db_table = 'source'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'name'],
+                name='source_user_name_uniq',
+            ),
+        ]
 
 
 class Giftcard(AuditedModel):
@@ -138,7 +162,10 @@ class Product(AuditedModel):
 
 
 class ProductItem(AuditedModel):
-    """Mirrors Sheets Product_Items; links a product to a transaction or receipt item."""
+    """Mirrors Sheets Product_Items; links a product to a transaction or receipt item.
+
+    end_date is when the purchase is expected to run out (optional).
+    """
 
     user = models.ForeignKey(
         User,
@@ -169,6 +196,7 @@ class ProductItem(AuditedModel):
         db_column='receipt_item_id',
     )
     price = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
 
     class Meta:
         db_table = 'product_item'

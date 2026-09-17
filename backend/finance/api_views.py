@@ -249,7 +249,8 @@ def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
 @require_GET
 @require_auth
 def metadata(request: HttpRequest) -> JsonResponse:
-    return JsonResponse(db_get_metadata())
+    user: User = request.finance_user  # type: ignore[attr-defined]
+    return JsonResponse(db_get_metadata(user=user))
 
 
 @require_GET
@@ -428,6 +429,7 @@ def create_product_item(request: HttpRequest) -> JsonResponse:
             transaction_id=body.get('transactionId'),
             receipt_item_id=body.get('receiptItemId'),
             price=body.get('price'),
+            end_date=body.get('endDate'),
         )
     except ValueError as exc:
         return json_error(str(exc))
@@ -436,11 +438,25 @@ def create_product_item(request: HttpRequest) -> JsonResponse:
     return JsonResponse(result)
 
 
-@require_http_methods(['DELETE'])
+@require_http_methods(['PUT', 'DELETE'])
 @require_auth
-def delete_product_item(request: HttpRequest, product_item_id: str) -> JsonResponse:
+def product_item_detail(request: HttpRequest, product_item_id: str) -> JsonResponse:
+    client = sheets_for(request)
+    if request.method == 'PUT':
+        try:
+            body = parse_json(request)
+            result = client.update_product_item(
+                product_item_id=product_item_id,
+                end_date=body.get('endDate'),
+            )
+        except ValueError as exc:
+            return json_error(str(exc))
+        except SheetsError as exc:
+            return json_error(str(exc), status=exc.status or 400)
+        return JsonResponse(result)
+
     try:
-        result = sheets_for(request).delete_product_item(product_item_id=product_item_id)
+        result = client.delete_product_item(product_item_id=product_item_id)
     except SheetsError as exc:
         return json_error(str(exc), status=exc.status or 400)
     return JsonResponse(result)
@@ -456,7 +472,8 @@ def assistant_parse(request: HttpRequest) -> JsonResponse:
             return json_error('message is required')
         metadata = body.get('metadata')
         if not metadata:
-            metadata = db_get_metadata()
+            user: User = request.finance_user  # type: ignore[attr-defined]
+            metadata = db_get_metadata(user=user)
         result = parse_finance_message(message, metadata)
     except ValueError as exc:
         return json_error(str(exc))
@@ -609,7 +626,8 @@ def receipt_ocr(request: HttpRequest) -> JsonResponse:
             return json_error('imageDataUrl is required')
         metadata = body.get('metadata')
         if not metadata:
-            metadata = db_get_metadata()
+            user: User = request.finance_user  # type: ignore[attr-defined]
+            metadata = db_get_metadata(user=user)
         result = extract_receipt_from_image(image, metadata)
     except ValueError as exc:
         return json_error(str(exc))
