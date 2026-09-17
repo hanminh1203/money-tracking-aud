@@ -9,6 +9,7 @@ from finance.db_reader import (
     ReaderError,
     get_dashboard_data,
     get_export_payload,
+    get_metadata,
     get_product_detail,
     get_products,
     get_transaction,
@@ -29,34 +30,59 @@ from finance.models import (
 from finance.sheets_client import SheetsClient, SheetsError
 
 
+def sheet_mirror(**overrides):
+    """Minimal Sheets payload for sync/compare tests, including lookups."""
+    payload = {
+        'transactions': [],
+        'receipts': [],
+        'receipt_items': [],
+        'giftcards': [],
+        'products': [],
+        'product_items': [],
+        'categories': [
+            {
+                'Main Category': 'Earnings',
+                'Sub category': 'Salary',
+                'Type': 'Income',
+            }
+        ],
+        'sources': [{'Name': 'Everyday', 'Type': 'Bank'}],
+    }
+    payload.update(overrides)
+    return payload
+
+
 class DashboardDataTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(email='dash@example.com')
         self.other = User.objects.create(email='other@example.com')
-        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
         self.salary = Category.objects.create(
+            user=self.user,
             main_category='Earnings',
             sub_category='Salary',
             type='Income',
         )
         self.groceries = Category.objects.create(
+            user=self.user,
             main_category='Living',
             sub_category='Groceries',
             type='Expense',
         )
         self.rent = Category.objects.create(
+            user=self.user,
             main_category='Living',
             sub_category='Rent',
             type='Expense',
         )
 
-    def add_transaction(self, row, value, amount, category=None, comment='', user=None):
+    def add_transaction(self, row, value, amount, category=None, comment='', user=None, source=None):
         return Transaction.objects.create(
             user=user or self.user,
             row_number=row,
             date=value,
             change=Decimal(amount),
-            source=self.source,
+            source=source or self.source,
             category=category,
             comment=comment,
         )
@@ -72,8 +98,20 @@ class DashboardDataTests(TestCase):
         self.add_transaction(7, date(2026, 1, 8), '-75.00', self.groceries)
         self.add_transaction(8, date(2026, 1, 9), '-25.00', None, 'Transfer')
         # Other user's data must not affect this dashboard.
+        other_source = Source.objects.create(user=self.other, name='Everyday', type='Bank')
+        other_salary = Category.objects.create(
+            user=self.other,
+            main_category='Earnings',
+            sub_category='Salary',
+            type='Income',
+        )
         self.add_transaction(
-            1, date(2026, 1, 5), '9999.00', self.salary, user=self.other
+            1,
+            date(2026, 1, 5),
+            '9999.00',
+            other_salary,
+            user=self.other,
+            source=other_source,
         )
 
         data = get_dashboard_data(user=self.user)
@@ -167,12 +205,53 @@ class DashboardApiTests(TestCase):
         get_data.assert_called_once_with(user=user)
 
 
+class MetadataIsolationTests(TestCase):
+    def test_get_metadata_only_returns_current_user_rows(self):
+        user = User.objects.create(email='meta@example.com')
+        other = User.objects.create(email='other-meta@example.com')
+        Source.objects.create(user=user, name='Mine', type='Bank')
+        Source.objects.create(user=other, name='Theirs', type='Bank')
+        Category.objects.create(
+            user=user,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        Category.objects.create(
+            user=other,
+            main_category='Living',
+            sub_category='Rent',
+            type='Expense',
+        )
+
+        data = get_metadata(user=user)
+
+        self.assertEqual([s['name'] for s in data['sources']], ['Mine'])
+        self.assertEqual([c['subCategory'] for c in data['categories']], ['Groceries'])
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_metadata_api_returns_current_user_rows(self, _access_token, get_user):
+        user = User.objects.create(email='meta-api@example.com')
+        other = User.objects.create(email='other-meta-api@example.com')
+        get_user.return_value = user
+        Source.objects.create(user=user, name='Mine', type='Cash')
+        Source.objects.create(user=other, name='Theirs', type='Cash')
+
+        response = self.client.get('/api/metadata')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['sources'], [{'name': 'Mine', 'type': 'Cash'}])
+        self.assertEqual(response.json()['categories'], [])
+
+
 class SyncIsolationTests(TestCase):
     def setUp(self):
         self.user_a = User.objects.create(email='a@example.com', sheet_id='sheet-a')
         self.user_b = User.objects.create(email='b@example.com', sheet_id='sheet-b')
-        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.source = Source.objects.create(user=self.user_b, name='Everyday', type='Bank')
         self.salary = Category.objects.create(
+            user=self.user_b,
             main_category='Earnings',
             sub_category='Salary',
             type='Income',
@@ -195,8 +274,8 @@ class SyncIsolationTests(TestCase):
 
     def test_sync_only_replaces_current_user_rows(self):
         client = MagicMock()
-        client.get_mirror_source_rows.return_value = {
-            'transactions': [
+        client.get_mirror_source_rows.return_value = sheet_mirror(
+            transactions=[
                 {
                     '__sheet_row': 2,
                     'Transaction ID': 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
@@ -209,25 +288,53 @@ class SyncIsolationTests(TestCase):
                     'Giftcard ID': '',
                 }
             ],
-            'receipts': [],
-            'receipt_items': [],
-            'giftcards': [],
-            'products': [],
-            'product_items': [],
-        }
+        )
 
         result = sync_from_sheets(client, user=self.user_a)
 
         self.assertTrue(result['ok'])
         self.assertEqual(result['inserted']['transactions'], 1)
+        self.assertEqual(result['inserted']['sources'], 1)
+        self.assertEqual(result['inserted']['category'], 1)
         self.assertEqual(Transaction.objects.filter(user=self.user_a).count(), 1)
         self.assertEqual(Transaction.objects.filter(user=self.user_b).count(), 1)
         self.assertEqual(Giftcard.objects.filter(user=self.user_b).count(), 1)
-        self.assertEqual(Source.objects.count(), 1)
-        self.assertEqual(Category.objects.count(), 1)
+        self.assertEqual(Source.objects.filter(user=self.user_a).count(), 1)
+        self.assertEqual(Source.objects.filter(user=self.user_b).count(), 1)
+        self.assertEqual(Category.objects.filter(user=self.user_a).count(), 1)
+        self.assertEqual(Category.objects.filter(user=self.user_b).count(), 1)
         synced = Transaction.objects.get(user=self.user_a)
         self.assertEqual(
             str(synced.id), 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+        )
+        self.assertEqual(synced.source.user_id, self.user_a.id)
+        self.assertEqual(synced.category.user_id, self.user_a.id)
+
+    def test_sync_replaces_current_user_sources_and_categories(self):
+        Source.objects.create(user=self.user_a, name='Old Source', type='Bank')
+        Category.objects.create(
+            user=self.user_a,
+            main_category='Old',
+            sub_category='Stale',
+            type='Expense',
+        )
+        client = MagicMock()
+        client.get_mirror_source_rows.return_value = sheet_mirror()
+
+        result = sync_from_sheets(client, user=self.user_a)
+
+        self.assertTrue(result['ok'])
+        self.assertFalse(Source.objects.filter(user=self.user_a, name='Old Source').exists())
+        self.assertTrue(Source.objects.filter(user=self.user_a, name='Everyday').exists())
+        self.assertFalse(
+            Category.objects.filter(user=self.user_a, sub_category='Stale').exists()
+        )
+        self.assertTrue(
+            Category.objects.filter(user=self.user_a, sub_category='Salary').exists()
+        )
+        self.assertTrue(Source.objects.filter(user=self.user_b, name='Everyday').exists())
+        self.assertTrue(
+            Category.objects.filter(user=self.user_b, sub_category='Salary').exists()
         )
 
     def test_sync_product_item_links_by_transaction_id(self):
@@ -235,8 +342,8 @@ class SyncIsolationTests(TestCase):
         product_id = uuid.UUID('c3d4e5f6-a7b8-9012-cdef-123456789012')
         product_item_id = uuid.UUID('d4e5f6a7-b8c9-0123-def0-234567890123')
         client = MagicMock()
-        client.get_mirror_source_rows.return_value = {
-            'transactions': [
+        client.get_mirror_source_rows.return_value = sheet_mirror(
+            transactions=[
                 {
                     '__sheet_row': 2,
                     'Transaction ID': str(tx_id),
@@ -249,13 +356,10 @@ class SyncIsolationTests(TestCase):
                     'Giftcard ID': '',
                 }
             ],
-            'receipts': [],
-            'receipt_items': [],
-            'giftcards': [],
-            'products': [
+            products=[
                 {'Product ID': str(product_id), 'Name': 'Milk'},
             ],
-            'product_items': [
+            product_items=[
                 {
                     'Product Item ID': str(product_item_id),
                     'Product ID': str(product_id),
@@ -264,7 +368,7 @@ class SyncIsolationTests(TestCase):
                     'Receipt Item ID': '',
                 }
             ],
-        }
+        )
 
         result = sync_from_sheets(client, user=self.user_a)
 
@@ -280,8 +384,8 @@ class SyncIsolationTests(TestCase):
         with_end_id = uuid.UUID('d4e5f6a7-b8c9-0123-def0-234567890123')
         without_end_id = uuid.UUID('e5f6a7b8-c9d0-1234-ef01-345678901234')
         tx2_id = uuid.UUID('f6a7b8c9-d0e1-2345-f012-456789012345')
-        source = {
-            'transactions': [
+        source = sheet_mirror(
+            transactions=[
                 {
                     '__sheet_row': 2,
                     'Transaction ID': str(tx_id),
@@ -305,13 +409,10 @@ class SyncIsolationTests(TestCase):
                     'Giftcard ID': '',
                 },
             ],
-            'receipts': [],
-            'receipt_items': [],
-            'giftcards': [],
-            'products': [
+            products=[
                 {'Product ID': str(product_id), 'Name': 'Milk'},
             ],
-            'product_items': [
+            product_items=[
                 {
                     'Product Item ID': str(with_end_id),
                     'Product ID': str(product_id),
@@ -329,7 +430,7 @@ class SyncIsolationTests(TestCase):
                     'End Date': '',
                 },
             ],
-        }
+        )
         client = MagicMock()
         client.get_mirror_source_rows.return_value = source
 
@@ -344,6 +445,8 @@ class SyncIsolationTests(TestCase):
         comparison = compare_mirror(client, user=self.user_a)
         self.assertTrue(comparison['matched'])
         self.assertTrue(comparison['tables']['product_items']['matched'])
+        self.assertTrue(comparison['tables']['category']['matched'])
+        self.assertTrue(comparison['tables']['sources']['matched'])
 
         without_end.end_date = date(2026, 4, 1)
         without_end.save(update_fields=['end_date'])
@@ -356,8 +459,8 @@ class SyncIsolationTests(TestCase):
         product_id = uuid.UUID('c3d4e5f6-a7b8-9012-cdef-123456789012')
         product_item_id = uuid.UUID('d4e5f6a7-b8c9-0123-def0-234567890123')
         client = MagicMock()
-        client.get_mirror_source_rows.return_value = {
-            'transactions': [
+        client.get_mirror_source_rows.return_value = sheet_mirror(
+            transactions=[
                 {
                     '__sheet_row': 2,
                     'Transaction ID': str(tx_id),
@@ -370,13 +473,10 @@ class SyncIsolationTests(TestCase):
                     'Giftcard ID': '',
                 }
             ],
-            'receipts': [],
-            'receipt_items': [],
-            'giftcards': [],
-            'products': [
+            products=[
                 {'Product ID': str(product_id), 'Name': 'Milk'},
             ],
-            'product_items': [
+            product_items=[
                 {
                     'Product Item ID': str(product_item_id),
                     'Product ID': str(product_id),
@@ -386,7 +486,7 @@ class SyncIsolationTests(TestCase):
                     'End Date': 'not-a-date',
                 }
             ],
-        }
+        )
         with self.assertRaises(SyncError) as ctx:
             sync_from_sheets(client, user=self.user_a)
         self.assertIn('Invalid date', str(ctx.exception))
@@ -396,8 +496,9 @@ class TransactionDetailTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(email='detail@example.com')
         self.other = User.objects.create(email='other-detail@example.com')
-        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
         self.groceries = Category.objects.create(
+            user=self.user,
             main_category='Living',
             sub_category='Groceries',
             type='Expense',
@@ -543,11 +644,12 @@ class TransactionDetailTests(TestCase):
 
         tx = self.add_transaction()
         salary = Category.objects.create(
+            user=self.user,
             main_category='Earnings',
             sub_category='Salary',
             type='Income',
         )
-        savings = Source.objects.create(name='Savings', type='Bank')
+        savings = Source.objects.create(user=self.user, name='Savings', type='Bank')
 
         update_transaction_detail(
             user=self.user,
@@ -719,8 +821,9 @@ class TransactionDetailTests(TestCase):
 class ProductTests(TestCase):
     def setUp(self):
         self.user = User.objects.create(email='products@example.com')
-        self.source = Source.objects.create(name='Everyday', type='Bank')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
         self.groceries = Category.objects.create(
+            user=self.user,
             main_category='Living',
             sub_category='Groceries',
             type='Expense',

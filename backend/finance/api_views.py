@@ -245,7 +245,8 @@ def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
 @require_GET
 @require_auth
 def metadata(request: HttpRequest) -> JsonResponse:
-    return JsonResponse(db_get_metadata())
+    user: User = request.finance_user  # type: ignore[attr-defined]
+    return JsonResponse(db_get_metadata(user=user))
 
 
 @require_GET
@@ -467,7 +468,8 @@ def assistant_parse(request: HttpRequest) -> JsonResponse:
             return json_error('message is required')
         metadata = body.get('metadata')
         if not metadata:
-            metadata = db_get_metadata()
+            user: User = request.finance_user  # type: ignore[attr-defined]
+            metadata = db_get_metadata(user=user)
         result = parse_finance_message(message, metadata)
     except ValueError as exc:
         return json_error(str(exc))
@@ -620,7 +622,8 @@ def receipt_ocr(request: HttpRequest) -> JsonResponse:
             return json_error('imageDataUrl is required')
         metadata = body.get('metadata')
         if not metadata:
-            metadata = db_get_metadata()
+            user: User = request.finance_user  # type: ignore[attr-defined]
+            metadata = db_get_metadata(user=user)
         result = extract_receipt_from_image(image, metadata)
     except ValueError as exc:
         return json_error(str(exc))

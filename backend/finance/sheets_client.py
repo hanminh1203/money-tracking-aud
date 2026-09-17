@@ -494,6 +494,8 @@ class SheetsClient:
         giftcard_table = self.get_table(settings.GIFTCARD_TABLE)
         product_table = self.get_table(settings.PRODUCT_TABLE)
         product_items_table = self.get_table(settings.PRODUCT_ITEMS_TABLE)
+        category_table = self.get_table(settings.CATEGORY_TABLE)
+        sources_table = self.get_table(settings.SOURCES_TABLE)
         (
             tx_vals,
             receipt_vals,
@@ -501,6 +503,8 @@ class SheetsClient:
             giftcard_vals,
             product_vals,
             product_item_vals,
+            category_vals,
+            sources_vals,
         ) = self.batch_get_values(
             [
                 self.data_range_a1(tx_table),
@@ -509,6 +513,8 @@ class SheetsClient:
                 self.data_range_a1(giftcard_table),
                 self.data_range_a1(product_table),
                 self.data_range_a1(product_items_table),
+                self.data_range_a1(category_table),
+                self.data_range_a1(sources_table),
             ]
         )
         return {
@@ -518,6 +524,8 @@ class SheetsClient:
             'giftcards': self._rows_as_dicts(giftcard_table, giftcard_vals),
             'products': self._rows_as_dicts(product_table, product_vals),
             'product_items': self._rows_as_dicts(product_items_table, product_item_vals),
+            'categories': self._rows_as_dicts(category_table, category_vals),
+            'sources': self._rows_as_dicts(sources_table, sources_vals),
         }
 
     def update_table_cell_at_row(

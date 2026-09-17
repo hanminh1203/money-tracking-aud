@@ -118,22 +118,22 @@ def _require_user(user: User | None) -> User:
     return user
 
 
-def _resolve_source_id(name: str) -> uuid.UUID:
+def _resolve_source_id(name: str, *, user: User) -> uuid.UUID:
     text = str(name or '').strip()
     if not text:
         raise ValueError('Source is required')
     try:
-        return Source.objects.values_list('id', flat=True).get(name=text)
+        return Source.objects.values_list('id', flat=True).get(user=user, name=text)
     except Source.DoesNotExist as exc:
         raise ValueError(f'Source {text!r} not found') from exc
 
 
-def _resolve_category_id(sub_category: str) -> uuid.UUID | None:
+def _resolve_category_id(sub_category: str, *, user: User) -> uuid.UUID | None:
     text = str(sub_category or '').strip()
     if not text:
         return None
     try:
-        return Category.objects.values_list('id', flat=True).get(sub_category=text)
+        return Category.objects.values_list('id', flat=True).get(user=user, sub_category=text)
     except Category.DoesNotExist as exc:
         raise ValueError(f'Sub category {text!r} not found') from exc
 
@@ -171,9 +171,9 @@ def save_transactions(rows: list[dict], *, user: User) -> None:
                     row_number=int(row['row_number']),
                     date=_parse_date(row['date']),
                     change=_dec(row['change']),
-                    source_id=_resolve_source_id(row.get('source') or ''),
+                    source_id=_resolve_source_id(row.get('source') or '', user=owner),
                     comment=str(row.get('comment') or ''),
-                    category_id=_resolve_category_id(row.get('sub_category') or ''),
+                    category_id=_resolve_category_id(row.get('sub_category') or '', user=owner),
                     receipt_id=uuid.UUID(str(receipt_id)) if receipt_id else None,
                     giftcard_id=uuid.UUID(str(giftcard_id)) if giftcard_id else None,
                 )
@@ -256,9 +256,9 @@ def save_receipt_bundle(
                         row_number=int(tx['row_number']),
                         date=_parse_date(tx.get('date', date)),
                         change=_dec(tx['change']),
-                        source_id=_resolve_source_id(tx.get('source') or ''),
+                        source_id=_resolve_source_id(tx.get('source') or '', user=owner),
                         comment=str(tx.get('comment') or ''),
-                        category_id=_resolve_category_id(tx.get('sub_category') or ''),
+                        category_id=_resolve_category_id(tx.get('sub_category') or '', user=owner),
                         receipt_id=rid,
                     )
                     for tx in transactions
@@ -301,9 +301,9 @@ def save_giftcard_purchase(
                         row_number=int(tx['row_number']),
                         date=_parse_date(tx.get('date', date)),
                         change=_dec(tx['change']),
-                        source_id=_resolve_source_id(tx.get('source') or ''),
+                        source_id=_resolve_source_id(tx.get('source') or '', user=owner),
                         comment=str(tx.get('comment') or ''),
-                        category_id=_resolve_category_id(tx.get('sub_category') or ''),
+                        category_id=_resolve_category_id(tx.get('sub_category') or '', user=owner),
                         giftcard_id=gid,
                     )
                     for tx in transactions
@@ -342,9 +342,9 @@ def save_giftcard_use(
                 row_number=int(row_number),
                 date=_parse_date(date),
                 change=_dec(change),
-                source_id=_resolve_source_id(GIFTCARD_SOURCE_NAME),
+                source_id=_resolve_source_id(GIFTCARD_SOURCE_NAME, user=owner),
                 comment=str(comment or ''),
-                category_id=_resolve_category_id(sub_category or ''),
+                category_id=_resolve_category_id(sub_category or '', user=owner),
                 giftcard_id=gid,
             )
     except Exception:
@@ -370,9 +370,9 @@ def update_transaction_detail(
         with db_transaction.atomic():
             transaction.date = _parse_date(date)
             transaction.change = _dec(change)
-            transaction.source_id = _resolve_source_id(source)
+            transaction.source_id = _resolve_source_id(source, user=owner)
             transaction.comment = str(comment or '')
-            transaction.category_id = _resolve_category_id(sub_category or '')
+            transaction.category_id = _resolve_category_id(sub_category or '', user=owner)
             transaction.version = (transaction.version or 1) + 1
             transaction.save(
                 update_fields=[

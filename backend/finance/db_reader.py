@@ -160,11 +160,11 @@ def _base_queryset(*, user: User, source: str | None = None) -> QuerySet[Transac
     return qs
 
 
-def get_metadata() -> dict:
+def get_metadata(*, user: User) -> dict:
     """Return sources and categories in the same shape as Sheets get_metadata."""
     sources = [
         {'name': s.name, 'type': s.type or ''}
-        for s in Source.objects.order_by('name')
+        for s in Source.objects.filter(user=user).order_by('name')
     ]
     categories = [
         {
@@ -172,7 +172,7 @@ def get_metadata() -> dict:
             'subCategory': c.sub_category,
             'type': c.type or '',
         }
-        for c in Category.objects.order_by('main_category', 'sub_category')
+        for c in Category.objects.filter(user=user).order_by('main_category', 'sub_category')
     ]
     return {'sources': sources, 'categories': categories}
 
@@ -717,12 +717,14 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
 
     categories = [
         [c.main_category or '', c.sub_category or '', c.type or '']
-        for c in Category.objects.order_by('main_category', 'sub_category').iterator()
+        for c in Category.objects.filter(user=user)
+        .order_by('main_category', 'sub_category')
+        .iterator()
     ]
 
     sources = [
         [s.name or '', s.type or '']
-        for s in Source.objects.order_by('name').iterator()
+        for s in Source.objects.filter(user=user).order_by('name').iterator()
     ]
 
     return {

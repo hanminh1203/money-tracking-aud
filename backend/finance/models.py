@@ -72,22 +72,46 @@ class ReceiptItem(AuditedModel):
 class Category(AuditedModel):
     """Mirrors Sheets Category row."""
 
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='categories',
+        db_column='user_id',
+    )
     main_category = models.CharField(max_length=256)
-    sub_category = models.CharField(max_length=256, unique=True)
+    sub_category = models.CharField(max_length=256)
     type = models.CharField(max_length=64, blank=True, default='')
 
     class Meta:
         db_table = 'category'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'sub_category'],
+                name='category_user_sub_category_uniq',
+            ),
+        ]
 
 
 class Source(AuditedModel):
     """Mirrors Sheets Sources row."""
 
-    name = models.CharField(max_length=256, unique=True)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='sources',
+        db_column='user_id',
+    )
+    name = models.CharField(max_length=256)
     type = models.CharField(max_length=64, blank=True, default='')
 
     class Meta:
         db_table = 'source'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'name'],
+                name='source_user_name_uniq',
+            ),
+        ]
 
 
 class Giftcard(AuditedModel):

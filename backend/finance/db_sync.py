@@ -25,7 +25,7 @@ from finance.models import (
 )
 from finance.sheets_client import SheetsClient
 
-# Sync/compare only these user-owned tables (Category/Source are shared, not synced).
+# Sync/compare these user-owned tables (including Category/Source lookups).
 MIRROR_TABLE_KEYS = (
     'transactions',
     'receipt',
@@ -33,6 +33,8 @@ MIRROR_TABLE_KEYS = (
     'giftcards',
     'products',
     'product_items',
+    'category',
+    'sources',
 )
 
 
@@ -194,6 +196,43 @@ def _product_item_fp(
     )
 
 
+def _category_fp(main_category: str, sub_category: str, type_name: str) -> tuple:
+    return (
+        str(main_category or '').strip(),
+        str(sub_category or '').strip(),
+        str(type_name or '').strip(),
+    )
+
+
+def _source_fp(name: str, type_name: str) -> tuple:
+    return (str(name or '').strip(), str(type_name or '').strip())
+
+
+def _parse_category_row(row: dict, index: int) -> tuple[str, str, str]:
+    try:
+        main_category = str(_cell(row, 'Main Category') or '').strip()
+        if not main_category:
+            raise ValueError('Main Category is required')
+        sub_category = str(_cell(row, 'Sub category', 'Sub Category') or '').strip()
+        if not sub_category:
+            raise ValueError('Sub category is required')
+        type_name = str(_cell(row, 'Type') or '').strip()
+        return main_category, sub_category, type_name
+    except ValueError as exc:
+        raise SyncError(f'Category row {index + 1}: {exc}') from exc
+
+
+def _parse_source_row(row: dict, index: int) -> tuple[str, str]:
+    try:
+        name = str(_cell(row, 'Name') or '').strip()
+        if not name:
+            raise ValueError('Name is required')
+        type_name = str(_cell(row, 'Type') or '').strip()
+        return name, type_name
+    except ValueError as exc:
+        raise SyncError(f'Source row {index + 1}: {exc}') from exc
+
+
 def _parse_product_row(row: dict, index: int) -> tuple[uuid.UUID, str]:
     try:
         pid = _optional_uuid(_cell(row, 'Product ID'))
@@ -326,6 +365,13 @@ def _parse_sheet_fingerprints(source: dict[str, list[dict]]) -> dict[str, list[t
         _product_item_fp(*_parse_product_item_row(row, i))
         for i, row in enumerate(source.get('product_items', []))
     ]
+    categories = [
+        _category_fp(*_parse_category_row(row, i))
+        for i, row in enumerate(source.get('categories', []))
+    ]
+    sources = [
+        _source_fp(*_parse_source_row(row, i)) for i, row in enumerate(source.get('sources', []))
+    ]
     return {
         'receipt': receipts,
         'receipt_items': items,
@@ -333,6 +379,8 @@ def _parse_sheet_fingerprints(source: dict[str, list[dict]]) -> dict[str, list[t
         'transactions': transactions,
         'products': products,
         'product_items': product_items,
+        'category': categories,
+        'sources': sources,
     }
 
 
@@ -378,6 +426,13 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
         )
         for pi in ProductItem.objects.filter(user=user).iterator()
     ]
+    categories = [
+        _category_fp(c.main_category, c.sub_category, c.type)
+        for c in Category.objects.filter(user=user).iterator()
+    ]
+    sources = [
+        _source_fp(s.name, s.type) for s in Source.objects.filter(user=user).iterator()
+    ]
     return {
         'receipt': receipts,
         'receipt_items': items,
@@ -385,6 +440,8 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
         'transactions': transactions,
         'products': products,
         'product_items': product_items,
+        'category': categories,
+        'sources': sources,
     }
 
 
@@ -414,15 +471,42 @@ def compare_mirror(client: SheetsClient, *, user: User) -> dict:
 
 def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
     """
-    Wipe this user's Transaction/Receipt/ReceiptItem/Giftcard rows and reload from Sheet.
+    Wipe this user's mirror rows (including Source/Category) and reload from Sheet.
 
-    Resolves Source/Category names against existing shared tables (not synced).
     Parses all sheet rows first so validation errors leave the DB unchanged.
     """
     source = client.get_mirror_source_rows()
 
-    source_by_name = {s.name: s.id for s in Source.objects.all()}
-    category_by_sub = {c.sub_category: c.id for c in Category.objects.all()}
+    source_objs: list[Source] = []
+    source_by_name: dict[str, uuid.UUID] = {}
+    for i, row in enumerate(source.get('sources', [])):
+        name, type_name = _parse_source_row(row, i)
+        if name in source_by_name:
+            raise SyncError(f'Source row {i + 1}: duplicate name {name!r}')
+        source_id = uuid.uuid4()
+        source_by_name[name] = source_id
+        source_objs.append(
+            Source(id=source_id, version=1, user=user, name=name, type=type_name)
+        )
+
+    category_objs: list[Category] = []
+    category_by_sub: dict[str, uuid.UUID] = {}
+    for i, row in enumerate(source.get('categories', [])):
+        main_category, sub_category, type_name = _parse_category_row(row, i)
+        if sub_category in category_by_sub:
+            raise SyncError(f'Category row {i + 1}: duplicate Sub category {sub_category!r}')
+        category_id = uuid.uuid4()
+        category_by_sub[sub_category] = category_id
+        category_objs.append(
+            Category(
+                id=category_id,
+                version=1,
+                user=user,
+                main_category=main_category,
+                sub_category=sub_category,
+                type=type_name,
+            )
+        )
 
     receipt_objs: list[Receipt] = []
     seen_receipt_ids: set[uuid.UUID] = set()
@@ -596,6 +680,10 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
         ReceiptItem.objects.filter(user=user).delete()
         Receipt.objects.filter(user=user).delete()
         Giftcard.objects.filter(user=user).delete()
+        Category.objects.filter(user=user).delete()
+        Source.objects.filter(user=user).delete()
+        Source.objects.bulk_create(source_objs)
+        Category.objects.bulk_create(category_objs)
         Receipt.objects.bulk_create(receipt_objs)
         ReceiptItem.objects.bulk_create(item_objs)
         Giftcard.objects.bulk_create(giftcard_objs)
@@ -612,5 +700,7 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
             'giftcards': len(giftcard_objs),
             'products': len(product_objs),
             'product_items': len(product_item_objs),
+            'category': len(category_objs),
+            'sources': len(source_objs),
         },
     }
