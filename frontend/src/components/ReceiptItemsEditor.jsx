@@ -10,9 +10,6 @@ export const emptyReceiptItem = () => ({
   amount: '',
   unit: 'piece',
   money: '',
-  productId: '',
-  productItemId: '',
-  endDate: '',
 });
 
 export function toReceiptItemForm(item) {
@@ -23,13 +20,10 @@ export function toReceiptItemForm(item) {
     amount: item.amount == null || item.amount === '' ? '' : String(item.amount),
     unit: item.unit || 'piece',
     money: item.money == null || item.money === '' ? '' : String(item.money),
-    productId: item.productId || '',
-    productItemId: item.productItemId || '',
-    endDate: item.endDate || '',
   };
 }
 
-export default function ReceiptItemsEditor({ items, onChange, total, products = [] }) {
+export default function ReceiptItemsEditor({ items, onChange, total }) {
   const units = [...DEFAULT_UNITS];
   for (const it of items) {
     if (it.unit && !units.includes(it.unit)) units.push(it.unit);
@@ -106,40 +100,12 @@ export default function ReceiptItemsEditor({ items, onChange, total, products = 
                 required
               />
             </Field>
-            {it.id && products.length > 0 && (
-              <Field label="Product" className="col-span-2 sm:col-span-1">
-                <select
-                  value={it.productId || ''}
-                  onChange={(e) =>
-                    updateItem(i, { productId: e.target.value, productItemId: '' })
-                  }
-                  className={selectClass}
-                >
-                  <option value="">None</option>
-                  {products.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            )}
-            {it.id && it.productId && (
-              <Field label="End date" className="col-span-2 sm:col-span-1">
-                <input
-                  type="date"
-                  value={it.endDate || ''}
-                  onChange={(e) => updateItem(i, { endDate: e.target.value })}
-                  className={inputClass}
-                />
-              </Field>
-            )}
             <button
               type="button"
               disabled={items.length === 1}
               onClick={() => onChange(items.filter((_, j) => j !== i))}
               aria-label="Remove item"
-              className="col-span-2 sm:col-span-1 inline-flex items-center justify-center min-h-11 min-w-11 sm:self-end sm:justify-self-end rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+              className="justify-self-end sm:justify-self-center inline-flex items-center justify-center min-h-11 min-w-11 rounded-lg text-text-muted hover:text-expense hover:bg-expense/10 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />

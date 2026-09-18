@@ -541,18 +541,20 @@ def _product_stats(items: list[ProductItem]) -> dict:
     for pi in items:
         d = _product_item_purchase_date(pi)
         if d is not None:
-            dated.append((d, _resolved_product_item_price(pi)))
+            dated.append((d, _resolved_product_item_price(pi), pi.end_date))
     dated.sort(key=lambda x: x[0])
 
     total_purchases = len(dated)
-    total_spent = sum((price for _, price in dated), Decimal('0'))
+    total_spent = sum((price for _, price, _ in dated), Decimal('0'))
     last_purchase_date = dated[-1][0].isoformat() if dated else None
 
     cost_per_day = None
     avg_days_between = None
     if dated:
-        last_date, last_price = dated[-1]
-        days_owned = max((timezone.localdate() - last_date).days, 1)
+        last_date, last_price, last_end = dated[-1]
+        # Latest purchase: end date when set, otherwise through today.
+        until = last_end if last_end is not None else timezone.localdate()
+        days_owned = max((until - last_date).days, 1)
         cost_per_day = _dec_to_number(last_price / Decimal(days_owned))
     if len(dated) >= 2:
         gaps = [(dated[i][0] - dated[i - 1][0]).days for i in range(1, len(dated))]

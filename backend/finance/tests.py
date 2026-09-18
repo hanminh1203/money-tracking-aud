@@ -979,7 +979,34 @@ class ProductTests(TestCase):
         self.assertEqual(detail['stats']['totalSpent'], 22.0)
         self.assertEqual(detail['stats']['lastPurchaseDate'], '2026-01-21')
         self.assertEqual(detail['stats']['avgDaysBetweenPurchases'], 20.0)
+        # No end date on latest → purchase date through today (10 days).
         self.assertAlmostEqual(detail['stats']['costPerDay'], 12.0 / 10)
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 31))
+    def test_product_cost_per_day_uses_latest_end_date(self, _localdate):
+        tx1 = self.add_transaction(1, date(2026, 1, 1), '-10.00')
+        tx2 = self.add_transaction(2, date(2026, 1, 21), '-12.00')
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx1,
+            price=Decimal('10.00'),
+            end_date=date(2026, 1, 20),
+        )
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx2,
+            price=Decimal('12.00'),
+            end_date=date(2026, 1, 27),
+        )
+
+        detail = get_product_detail(user=self.user, product_id=str(self.product.id))
+        # Latest purchase 21→27 Jan = 6 days, not through today.
+        self.assertAlmostEqual(detail['stats']['costPerDay'], 12.0 / 6)
+
+        products = get_products(user=self.user)
+        self.assertAlmostEqual(products[0]['costPerDay'], 12.0 / 6)
 
     def test_get_products_list(self):
         tx = self.add_transaction(1, date(2026, 1, 10), '-5.00')

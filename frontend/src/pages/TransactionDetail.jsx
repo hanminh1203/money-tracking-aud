@@ -10,12 +10,8 @@ import ReceiptItemsEditor, {
 import {
   getGiftcards,
   getMetadata,
-  getProducts,
   getTransaction,
   updateTransaction,
-  createProductItem,
-  updateProductItem,
-  deleteProductItem,
 } from '../lib/api';
 import { formatAUD, formatDateShort, parseDate } from '../lib/transform';
 
@@ -135,13 +131,13 @@ function initialGiftcardPayments(data) {
 
 function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   const hasReceipt = Boolean(data.receiptId && data.receipt);
-  const [type, setType] = useState(
+  const initialType =
     data.type === 'Income' || data.type === 'Expense'
       ? data.type
       : data.change < 0
         ? 'Expense'
-        : 'Income'
-  );
+        : 'Income';
+  const type = initialType;
   const [date, setDate] = useState(toInputDate(data.date));
   const [amount, setAmount] = useState(
     data.change == null ? '' : String(Math.abs(Number(data.change)))
@@ -152,31 +148,10 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   const [subCategory, setSubCategory] = useState(data.subCategory || '');
   const [comment, setComment] = useState(data.comment || '');
   const [items, setItems] = useState(
-    hasReceipt
-      ? (data.receipt.items || []).map(toReceiptItemForm)
-      : []
+    hasReceipt ? (data.receipt.items || []).map(toReceiptItemForm) : []
   );
-  const [txProducts, setTxProducts] = useState(
-    (data.products || []).map((p) => ({
-      productItemId: p.id,
-      productId: p.productId,
-      name: p.name,
-      price: p.price == null ? '' : String(p.price),
-      endDate: p.endDate || '',
-    }))
-  );
-  const [catalogProducts, setCatalogProducts] = useState([]);
-  const [newProductId, setNewProductId] = useState('');
-  const [newProductPrice, setNewProductPrice] = useState('');
-  const [newProductEndDate, setNewProductEndDate] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState(null);
-
-  useEffect(() => {
-    getProducts()
-      .then((rows) => setCatalogProducts(Array.isArray(rows) ? rows : []))
-      .catch(() => setCatalogProducts([]));
-  }, []);
 
   useEffect(() => {
     getGiftcards()
@@ -278,61 +253,6 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
       }
       await updateTransaction(data.id, payload);
 
-      const originalProducts = data.products || [];
-      for (const p of originalProducts) {
-        if (!txProducts.some((tp) => tp.productItemId === p.id)) {
-          await deleteProductItem(p.id);
-        }
-      }
-      for (const p of txProducts) {
-        if (p.productItemId) {
-          const orig = originalProducts.find((o) => o.id === p.productItemId);
-          const origEnd = orig?.endDate || '';
-          const newEnd = p.endDate || '';
-          if (origEnd !== newEnd) {
-            await updateProductItem(p.productItemId, { endDate: newEnd || null });
-          }
-        }
-        if (!p.productItemId && p.productId) {
-          await createProductItem({
-            productId: p.productId,
-            transactionId: data.id,
-            price: Number(p.price),
-            endDate: p.endDate || null,
-          });
-        }
-      }
-
-      const fresh = await getTransaction(data.id);
-      if (hasReceipt && fresh.receipt?.items) {
-        const originalItems = data.receipt?.items || [];
-        const savedItems = items.filter((it) => it.name.trim() && Number(it.money) > 0);
-        for (let i = 0; i < savedItems.length; i += 1) {
-          const formItem = savedItems[i];
-          const freshItem = fresh.receipt.items[i];
-          if (!freshItem?.id) continue;
-          const orig = originalItems.find((o) => o.id === formItem.id);
-          const origProductId = orig?.productId || '';
-          const newProductId = formItem.productId || '';
-          if (orig?.productItemId && newProductId !== origProductId) {
-            await deleteProductItem(orig.productItemId);
-          }
-          if (newProductId && newProductId !== origProductId) {
-            await createProductItem({
-              productId: newProductId,
-              receiptItemId: freshItem.id,
-              endDate: formItem.endDate || null,
-            });
-          } else if (orig?.productItemId && newProductId === origProductId) {
-            const origEnd = orig.endDate || '';
-            const newEnd = formItem.endDate || '';
-            if (origEnd !== newEnd) {
-              await updateProductItem(orig.productItemId, { endDate: newEnd || null });
-            }
-          }
-        }
-      }
-
       const refreshed = await getTransaction(data.id);
       onUpdated?.(refreshed);
       onSaved?.();
@@ -353,35 +273,13 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
       >
         <Card title="Transaction details">
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-2 p-1 bg-bg-raised rounded-lg">
-              {['Expense', 'Income'].map((t) => (
-                <button
-                  type="button"
-                  key={t}
-                  onClick={() => {
-                    setType(t);
-                    if (t === 'Income') {
-                      setGiftcardPayments([]);
-                      setPayments((prev) => (prev.length === 0 ? [{ source: '', amount: '' }] : prev));
-                    }
-                    if (subCategory) {
-                      const stillValid = (metadata.categories || []).some(
-                        (c) => c.subCategory === subCategory && c.type === t
-                      );
-                      if (!stillValid) setSubCategory('');
-                    }
-                  }}
-                  className={`min-h-11 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                    type === t
-                      ? t === 'Income'
-                        ? 'bg-income/20 text-income'
-                        : 'bg-expense/20 text-expense'
-                      : 'text-text-secondary hover:text-text-primary'
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
+            <div
+              className={`inline-flex items-center min-h-11 px-3 rounded-md text-sm font-medium ${
+                type === 'Income' ? 'bg-income/20 text-income' : 'bg-expense/20 text-expense'
+              }`}
+              aria-label={`Transaction type ${type}`}
+            >
+              {type}
             </div>
 
             <Field label="Date">
@@ -607,122 +505,11 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                 items={items}
                 onChange={setItems}
                 total={itemsTotal}
-                products={catalogProducts}
               />
             )}
           </Card>
         )}
       </div>
-
-      <Card title="Products">
-        <div className="space-y-3">
-          {txProducts.length === 0 ? (
-            <p className="text-sm text-text-muted">No products linked to this transaction.</p>
-          ) : (
-            <ul className="space-y-2">
-              {txProducts.map((p, index) => (
-                <li
-                  key={p.productItemId || `new-${p.productId}-${index}`}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-bg-border/60 px-3 py-2"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-text-primary truncate">
-                      {p.name ||
-                        catalogProducts.find((c) => c.id === p.productId)?.name ||
-                        'Product'}
-                    </p>
-                    {p.price !== '' && (
-                      <p className="text-xs text-text-muted tabular-money">{formatAUD(p.price)}</p>
-                    )}
-                  </div>
-                  <Field label="End date" className="w-40 shrink-0">
-                    <input
-                      type="date"
-                      value={p.endDate || ''}
-                      onChange={(e) => {
-                        const next = [...txProducts];
-                        next[index] = { ...p, endDate: e.target.value };
-                        setTxProducts(next);
-                      }}
-                      className={inputClass}
-                    />
-                  </Field>
-                  <button
-                    type="button"
-                    onClick={() => setTxProducts(txProducts.filter((_, i) => i !== index))}
-                    className="text-xs text-text-muted hover:text-expense shrink-0"
-                  >
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {catalogProducts.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-[1fr_8rem_9rem_auto] gap-2 items-end pt-1">
-              <Field label="Product">
-                <select
-                  value={newProductId}
-                  onChange={(e) => setNewProductId(e.target.value)}
-                  className={selectClass}
-                >
-                  <option value="">Select product</option>
-                  {catalogProducts
-                    .filter((p) => !txProducts.some((tp) => tp.productId === p.id))
-                    .map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                </select>
-              </Field>
-              <Field label="Price">
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={newProductPrice}
-                  onChange={(e) => setNewProductPrice(e.target.value)}
-                  className={inputClass}
-                  placeholder="0.00"
-                />
-              </Field>
-              <Field label="End date">
-                <input
-                  type="date"
-                  value={newProductEndDate}
-                  onChange={(e) => setNewProductEndDate(e.target.value)}
-                  className={inputClass}
-                />
-              </Field>
-              <button
-                type="button"
-                className="btn-secondary min-h-11"
-                disabled={!newProductId || !newProductPrice}
-                onClick={() => {
-                  const picked = catalogProducts.find((p) => p.id === newProductId);
-                  if (!picked) return;
-                  setTxProducts([
-                    ...txProducts,
-                    {
-                      productItemId: '',
-                      productId: picked.id,
-                      name: picked.name,
-                      price: newProductPrice,
-                      endDate: newProductEndDate,
-                    },
-                  ]);
-                  setNewProductId('');
-                  setNewProductPrice('');
-                  setNewProductEndDate('');
-                }}
-              >
-                Add
-              </button>
-            </div>
-          )}
-        </div>
-      </Card>
 
       {hasReceipt && itemsTotal > 0 && !fundingMatch && (
         <p className="text-sm text-expense">
