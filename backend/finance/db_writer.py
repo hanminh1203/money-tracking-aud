@@ -27,6 +27,25 @@ from finance.models import (
 
 logger = logging.getLogger(__name__)
 
+DUAL_WRITE_USER_MESSAGE = (
+    'Saved to Google Sheets but not to the database. '
+    'Open Management and run Sync so the app matches the sheet.'
+)
+DUAL_WRITE_DELETE_USER_MESSAGE = (
+    'Deleted from Google Sheets but not from the database. '
+    'Open Management and run Sync so the app matches the sheet.'
+)
+
+
+class DualWriteError(Exception):
+    """Postgres dual-write failed after a successful Sheets write."""
+
+    status = 500
+
+    def __init__(self, message: str = DUAL_WRITE_USER_MESSAGE):
+        super().__init__(message)
+
+
 RECEIPT_ITEM_NAMESPACE = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
 
 
@@ -452,6 +471,75 @@ def save_giftcard_use(
             )
     except Exception:
         logger.exception('Postgres dual-write failed for giftcard use %s', giftcard_id)
+
+
+def plan_giftcard_credits(
+    *,
+    user: User,
+    giftcard_payments: list[Any] | None,
+) -> list[dict]:
+    """SET Giftcard.balance to current + amounts this transaction debited.
+
+    Uses Postgres balances (not sheet increments) so a retried delete is
+    idempotent while the dual-write Postgres step has not yet run.
+    """
+    from finance.funding import aggregate_giftcard_debits
+
+    owner = _require_user(user)
+    rows: list[dict] = []
+    for gp in giftcard_payments or []:
+        if hasattr(gp, 'giftcard_id'):
+            rows.append({'giftcard_id': str(gp.giftcard_id), 'amount': gp.amount})
+        else:
+            rows.append(gp)
+    if not rows:
+        return []
+    totals = aggregate_giftcard_debits(rows)
+    planned: list[dict] = []
+    for gid, amount in totals.items():
+        try:
+            card = Giftcard.objects.get(pk=gid, user=owner)
+        except (Giftcard.DoesNotExist, ValueError) as exc:
+            raise ValueError(f'Giftcard {gid} not found') from exc
+        new_balance = (card.balance + amount).quantize(Decimal('0.01'))
+        planned.append(
+            {
+                'giftcard_id': gid,
+                'amount': amount,
+                'new_balance': new_balance,
+                'row_number': card.row_number,
+            }
+        )
+    return planned
+
+
+def delete_transaction_detail(
+    *,
+    user: User,
+    transaction: Transaction,
+    giftcard_credits: list[dict] | None = None,
+) -> None:
+    """Delete one transaction after Sheets deletes succeed.
+
+    Payments, GiftcardPayments, the 1:1 Receipt (+ items), and ProductItems
+    linked via the transaction or those receipt items CASCADE from Transaction.
+    Giftcard rows themselves are not deleted; balances are restored via credits.
+    """
+    owner = _require_user(user)
+    tid = transaction.id
+    try:
+        with db_transaction.atomic():
+            _apply_giftcard_balance_updates(
+                owner=owner, giftcard_debits=giftcard_credits
+            )
+            deleted, _ = Transaction.objects.filter(pk=tid, user=owner).delete()
+            if not deleted:
+                raise ValueError(f'Transaction {tid} not found')
+    except DualWriteError:
+        raise
+    except Exception as exc:
+        logger.exception('Postgres dual-write failed for transaction delete %s', tid)
+        raise DualWriteError(DUAL_WRITE_DELETE_USER_MESSAGE) from exc
 
 
 def update_transaction_detail(

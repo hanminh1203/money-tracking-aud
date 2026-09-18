@@ -4,6 +4,9 @@ import { formatAUD, formatDateShort } from '../lib/transform';
 const viewBtnClass =
   'inline-flex items-center justify-center min-h-9 px-3 py-1.5 rounded-md border border-bg-border bg-bg-surface text-xs text-text-secondary hover:text-text-primary hover:border-accent/50 transition-colors duration-200 cursor-pointer';
 
+const deleteBtnClass =
+  'inline-flex items-center justify-center min-h-9 px-3 py-1.5 rounded-md border border-expense/40 bg-bg-surface text-xs text-expense hover:bg-expense/10 hover:border-expense transition-colors duration-200 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed';
+
 const pageBtnClass =
   'inline-flex items-center justify-center min-h-11 px-3 py-1.5 rounded-md border border-bg-border bg-bg-surface text-xs text-text-secondary hover:text-text-primary hover:border-accent/50 transition-colors duration-200 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-bg-border disabled:hover:text-text-secondary';
 
@@ -26,7 +29,22 @@ function DetailsLink({ transaction }) {
   );
 }
 
-function MobileTransactionCards({ transactions }) {
+function DeleteButton({ transaction, onDelete, disabled }) {
+  if (!transaction?.id || !onDelete) return null;
+  return (
+    <button
+      type="button"
+      className={deleteBtnClass}
+      disabled={disabled}
+      aria-label="Delete transaction"
+      onClick={() => onDelete(transaction)}
+    >
+      Delete
+    </button>
+  );
+}
+
+function MobileTransactionCards({ transactions, onDelete, deletingId }) {
   return (
     <ul className="space-y-2 sm:hidden">
       {transactions.map((t, i) => (
@@ -48,7 +66,14 @@ function MobileTransactionCards({ transactions }) {
               <div className={`text-sm font-medium tabular-money ${amountClass(t)}`}>
                 {formatAUD(t.change)}
               </div>
-              <DetailsLink transaction={t} />
+              <div className="flex flex-col items-end gap-1.5">
+                <DetailsLink transaction={t} />
+                <DeleteButton
+                  transaction={t}
+                  onDelete={onDelete}
+                  disabled={Boolean(deletingId)}
+                />
+              </div>
             </div>
           </div>
         </li>
@@ -66,6 +91,8 @@ export default function TransactionList({
   totalPages,
   onPageChange,
   loading = false,
+  onDelete,
+  deletingId,
 }) {
   const paginated = Number.isFinite(pageSize) && pageSize > 0 && total != null;
   const safePage = paginated ? Math.min(Math.max(1, page || 1), Math.max(1, totalPages || 1)) : 1;
@@ -81,7 +108,11 @@ export default function TransactionList({
   return (
     <>
       <div className={loading ? 'opacity-60' : undefined}>
-        <MobileTransactionCards transactions={transactions} />
+        <MobileTransactionCards
+          transactions={transactions}
+          onDelete={onDelete}
+          deletingId={deletingId}
+        />
 
         <div className="hidden sm:block overflow-x-auto scrollbar-thin">
           <table className="w-full text-sm">
@@ -96,7 +127,7 @@ export default function TransactionList({
                   Amount
                 </th>
                 <th className="py-2 pl-4 text-xs font-semibold uppercase tracking-[0.05em] text-right">
-                  Details
+                  Actions
                 </th>
               </tr>
             </thead>
@@ -119,7 +150,14 @@ export default function TransactionList({
                     {formatAUD(t.change)}
                   </td>
                   <td className="py-2.5 pl-4 text-right whitespace-nowrap">
-                    <DetailsLink transaction={t} />
+                    <div className="inline-flex items-center justify-end gap-1.5">
+                      <DetailsLink transaction={t} />
+                      <DeleteButton
+                        transaction={t}
+                        onDelete={onDelete}
+                        disabled={Boolean(deletingId)}
+                      />
+                    </div>
                   </td>
                 </tr>
               ))}

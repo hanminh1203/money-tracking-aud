@@ -6,8 +6,11 @@ import TransactionList from '../components/TransactionList';
 import AddTransactionForm from '../components/AddTransactionForm';
 import TransferForm from '../components/TransferForm';
 import ReceiptForm from '../components/ReceiptForm';
-import { getTransactionData } from '../lib/api';
+import { deleteTransaction, getTransactionData } from '../lib/api';
 import { normalizeRows } from '../lib/transform';
+
+const LIST_DELETE_CONFIRM =
+  'Delete this transaction? Payments, its receipt (if any), and product links will be removed. Giftcard spend will be credited back. The other side of a transfer is not deleted. This cannot be undone.';
 
 export default function Transactions({ metadata, balances, onSaved, listVersion }) {
   const [modal, setModal] = useState(null);
@@ -18,6 +21,7 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,6 +51,21 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
     setModal(null);
   }
 
+  async function handleDelete(transaction) {
+    if (!transaction?.id) return;
+    if (!window.confirm(LIST_DELETE_CONFIRM)) return;
+    setDeletingId(transaction.id);
+    setError(null);
+    try {
+      await deleteTransaction(transaction.id);
+      onSaved?.();
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <PageHeader
       title="Transactions"
@@ -74,7 +93,9 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
           total={total}
           totalPages={totalPages}
           onPageChange={setPage}
-          loading={loading}
+          loading={loading || Boolean(deletingId)}
+          onDelete={handleDelete}
+          deletingId={deletingId}
         />
       </Card>
 

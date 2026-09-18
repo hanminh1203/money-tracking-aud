@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import Card from '../components/Card';
 import { DecimalInput, Field, inputClass, selectClass } from '../components/FormField';
+import Modal from '../components/Modal';
 import PageHeader from '../components/PageHeader';
 import ReceiptItemsEditor, {
   emptyReceiptItem,
   toReceiptItemForm,
 } from '../components/ReceiptItemsEditor';
 import {
+  deleteTransaction,
   getGiftcards,
   getMetadata,
   getTransaction,
@@ -130,6 +132,7 @@ function initialGiftcardPayments(data) {
 }
 
 function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
+  const navigate = useNavigate();
   const hasReceipt = Boolean(data.receiptId && data.receipt);
   const initialType =
     data.type === 'Income' || data.type === 'Expense'
@@ -152,6 +155,8 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   );
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     getGiftcards()
@@ -264,7 +269,28 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     }
   }
 
+  async function handleDelete() {
+    setDeleting(true);
+    setStatus(null);
+    try {
+      await deleteTransaction(data.id);
+      onSaved?.();
+      navigate('/transactions');
+    } catch (err) {
+      setConfirmDelete(false);
+      setStatus({ ok: false, msg: err.message || String(err) });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const isTransfer = (data.subCategory || '') === 'Exchange (self)';
+  const hasGiftcardPayments = (data.giftcardPayments || []).length > 0;
+  const hasProductLinks = (data.products || []).length > 0
+    || (data.receipt?.items || []).some((it) => it.productId);
+
   return (
+    <>
     <form onSubmit={handleSubmit} className="space-y-5">
       <div
         className={
@@ -511,18 +537,90 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
         </p>
       )}
 
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        <Link to="/transactions" className="btn-secondary">
-          Cancel
-        </Link>
-        <button type="submit" disabled={!canSubmit} className="btn-primary">
-          {submitting ? 'Saving…' : 'Save'}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <button
+          type="button"
+          className="btn-secondary text-expense border-expense/40 hover:border-expense hover:bg-expense/10"
+          onClick={() => setConfirmDelete(true)}
+          disabled={submitting || deleting}
+        >
+          Delete
         </button>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Link to="/transactions" className="btn-secondary">
+            Cancel
+          </Link>
+          <button type="submit" disabled={!canSubmit} className="btn-primary">
+            {submitting ? 'Saving…' : 'Save'}
+          </button>
+        </div>
       </div>
 
       {status && (
         <p className={`text-sm ${status.ok ? 'text-income' : 'text-expense'}`}>{status.msg}</p>
       )}
     </form>
+
+      {confirmDelete && (
+        <Modal
+          title="Delete this transaction?"
+          onClose={() => {
+            if (!deleting) setConfirmDelete(false);
+          }}
+          maxWidth="max-w-lg"
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-text-secondary">
+              This cannot be undone. The app will remove this row from Google Sheets and Postgres
+              together.
+            </p>
+            <ul className="list-disc pl-5 space-y-1.5 text-sm text-text-primary">
+              <li>The transaction and its payment rows are deleted.</li>
+              {hasReceipt ? (
+                <li>
+                  The linked receipt and its line items are deleted. Receipts belong to exactly one
+                  transaction.
+                </li>
+              ) : null}
+              {hasGiftcardPayments ? (
+                <li>Giftcard amounts spent on this transaction are credited back to those cards.</li>
+              ) : null}
+              <li>
+                Product links for this purchase are removed
+                {hasProductLinks ? '. The product names stay in your catalog' : ''}.
+              </li>
+              {isTransfer ? (
+                <li>
+                  Transfers are stored as two independent transactions. The other side is not
+                  deleted — remove it separately if needed.
+                </li>
+              ) : null}
+              <li>Giftcard catalog rows (bought cards) are kept even if this was a giftcard purchase.</li>
+            </ul>
+            {status && !status.ok && (
+              <p className="text-sm text-expense">{status.msg}</p>
+            )}
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setConfirmDelete(false)}
+                disabled={deleting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary bg-expense hover:bg-expense"
+                onClick={handleDelete}
+                disabled={deleting}
+              >
+                {deleting ? 'Deleting…' : 'Delete transaction'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
