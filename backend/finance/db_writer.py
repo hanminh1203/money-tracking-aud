@@ -371,7 +371,7 @@ def save_giftcard_purchase(
     transaction: dict,
     payment: dict,
 ) -> None:
-    """Insert Giftcard + buy Transaction with one Payment."""
+    """Insert Giftcard + cash-out Transaction (asset conversion, not an expense)."""
     owner = _require_user(user)
     try:
         gid = uuid.UUID(str(giftcard_id))
@@ -464,6 +464,7 @@ def update_transaction_detail(
     sub_category: str,
     payments: list[dict],
     giftcard_payments: list[dict] | None = None,
+    giftcard_debits: list[dict] | None = None,
     receipt_total: Any | None = None,
     items: list[dict] | None = None,
 ) -> None:
@@ -498,6 +499,7 @@ def update_transaction_detail(
                 payments=payment_rows,
                 giftcard_payments=giftcard_rows,
             )
+            _apply_giftcard_balance_updates(owner=owner, giftcard_debits=giftcard_debits)
 
             try:
                 receipt = Receipt.objects.select_for_update().get(

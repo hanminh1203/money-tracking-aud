@@ -42,6 +42,8 @@ PRODUCT_ITEM_COLUMNS = [
     'End Date',
 ]
 GIFTCARD_SOURCE_NAME = 'Giftcard'
+# Cash↔cash transfers and cash→giftcard purchases (not an Expense).
+TRANSFER_SUB_CATEGORY = 'Exchange (self)'
 
 # Export column formats for Australian locale workbooks.
 EXPORT_AUD_CURRENCY = {'type': 'CURRENCY', 'pattern': '"$"#,##0.00'}
@@ -831,32 +833,48 @@ class SheetsClient:
             payment_rows.append({'source': pay_source, 'amount': amt})
         return payment_rows, giftcard_rows
 
-    def plan_giftcard_debits(self, giftcard_payments: list[dict] | None) -> list[dict]:
-        """Validate giftcard balances and return planned debits (no writes)."""
-        from finance.funding import aggregate_giftcard_debits, validate_giftcard_debit
+    def plan_giftcard_debits(
+        self,
+        giftcard_payments: list[dict] | None,
+        previous_payments: list[dict] | None = None,
+    ) -> list[dict]:
+        """Validate giftcard balances and return planned balance updates (no writes).
+
+        ``previous_payments`` are this transaction's existing giftcard payments
+        (already reflected in Giftcard.balance). Edits move balances by the
+        net difference so a $20 redemption edited to $10 credits $10 back.
+        """
+        from decimal import Decimal
+
+        from finance.funding import net_giftcard_debits, validate_giftcard_debit
         from finance.models import Giftcard
 
         try:
-            totals = aggregate_giftcard_debits(giftcard_payments)
+            deltas = net_giftcard_debits(giftcard_payments, previous_payments)
         except ValueError as exc:
             raise SheetsError(str(exc)) from exc
-        if not totals:
+        if not deltas:
             return []
 
         planned: list[dict] = []
-        for gid, amount in totals.items():
+        for gid, delta in deltas.items():
             try:
                 card = Giftcard.objects.get(pk=gid, user=self.user)
             except (Giftcard.DoesNotExist, ValueError) as exc:
                 raise SheetsError(f'Giftcard not found: {gid}', status=404) from exc
             try:
-                new_balance = validate_giftcard_debit(card.balance, amount)
+                if delta > 0:
+                    new_balance = validate_giftcard_debit(card.balance, delta)
+                else:
+                    new_balance = (Decimal(str(card.balance)) - delta).quantize(
+                        Decimal('0.01')
+                    )
             except ValueError as exc:
                 raise SheetsError(str(exc)) from exc
             planned.append(
                 {
                     'giftcard_id': gid,
-                    'amount': float(amount),
+                    'amount': float(delta),
                     'new_balance': float(new_balance),
                     'row_number': card.row_number,
                 }
@@ -954,10 +972,10 @@ class SheetsClient:
         from_tx_id = str(uuid.uuid4())
         to_tx_id = str(uuid.uuid4())
         from_row = self.append_transaction_row(
-            [from_tx_id, date, -abs_amt, note, 'Exchange (self)']
+            [from_tx_id, date, -abs_amt, note, TRANSFER_SUB_CATEGORY]
         )
         to_row = self.append_transaction_row(
-            [to_tx_id, date, abs_amt, note, 'Exchange (self)']
+            [to_tx_id, date, abs_amt, note, TRANSFER_SUB_CATEGORY]
         )
         from_payments, _ = self.append_funding_rows(
             transaction_id=from_tx_id,
@@ -976,7 +994,7 @@ class SheetsClient:
                     'date': date,
                     'change': -abs_amt,
                     'comment': note,
-                    'sub_category': 'Exchange (self)',
+                    'sub_category': TRANSFER_SUB_CATEGORY,
                     'row_number': from_row,
                     'payments': from_payments,
                 },
@@ -985,7 +1003,7 @@ class SheetsClient:
                     'date': date,
                     'change': abs_amt,
                     'comment': note,
-                    'sub_category': 'Exchange (self)',
+                    'sub_category': TRANSFER_SUB_CATEGORY,
                     'row_number': to_row,
                     'payments': to_payments,
                 },
@@ -1220,18 +1238,20 @@ class SheetsClient:
         elif items:
             raise SheetsError('This transaction is not linked to a receipt')
 
-        if payments is None and giftcard_payments is None:
+        previous_giftcard_rows = [
+            {
+                'giftcard_id': str(gp.giftcard_id),
+                'amount': abs(float(gp.amount)),
+            }
+            for gp in tx.giftcard_payments.all()
+        ]
+        funding_unchanged = payments is None and giftcard_payments is None
+        if funding_unchanged:
             payment_rows = [
                 {'source': p.source.name, 'amount': abs(float(p.amount))}
                 for p in tx.payments.all()
             ]
-            giftcard_rows = [
-                {
-                    'giftcard_id': str(gp.giftcard_id),
-                    'amount': abs(float(gp.amount)),
-                }
-                for gp in tx.giftcard_payments.all()
-            ]
+            giftcard_rows = list(previous_giftcard_rows)
             if not payment_rows and not giftcard_rows and source:
                 payment_rows = [{'source': source, 'amount': abs_amt}]
         else:
@@ -1257,6 +1277,15 @@ class SheetsClient:
                 raise SheetsError(
                     f'Payment amounts ({funding_total}) must equal items total ({total})'
                 )
+
+        giftcard_debits = (
+            []
+            if funding_unchanged
+            else self.plan_giftcard_debits(
+                giftcard_rows,
+                previous_payments=previous_giftcard_rows,
+            )
+        )
 
         self.update_table_row_at(
             settings.TRANSACTIONS_TABLE,
@@ -1338,6 +1367,8 @@ class SheetsClient:
             if extra_old:
                 self.delete_table_rows_at(settings.RECEIPT_ITEMS_TABLE, extra_old)
 
+        self.apply_giftcard_debits(giftcard_debits)
+
         db_writer.update_transaction_detail(
             user=self.user,
             transaction=tx,
@@ -1347,6 +1378,7 @@ class SheetsClient:
             sub_category=category,
             payments=saved_payments,
             giftcard_payments=saved_giftcard_payments,
+            giftcard_debits=giftcard_debits,
             receipt_total=total,
             items=normalized_items,
         )
@@ -1384,7 +1416,8 @@ class SheetsClient:
 
         giftcard_id = str(uuid.uuid4())
         note = f'Buy giftcard: {shop_name}'
-        sub_category = 'Giftcards'
+        # Asset conversion, not consumption — same category as cash transfers.
+        sub_category = TRANSFER_SUB_CATEGORY
 
         gc_row_numbers = self.append_rows(
             settings.GIFTCARD_TABLE,

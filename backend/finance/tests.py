@@ -19,6 +19,7 @@ from finance.db_writer import save_product_item, update_product_item
 from finance.models import (
     Category,
     Giftcard,
+    GiftcardPayment,
     Payment,
     Product,
     ProductItem,
@@ -189,6 +190,178 @@ class DashboardDataTests(TestCase):
         self.assertEqual(data['incomeBreakdown'], [])
         self.assertEqual(data['expenseBreakdown'], [])
         self.assertEqual(data['transactions'], [])
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    def test_giftcard_buy_then_use_counts_net_worth_and_spend_once(self, _localdate):
+        exchange = Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        self.add_transaction(1, date(2026, 1, 2), '100.00', self.salary)
+
+        buy = Transaction.objects.create(
+            user=self.user,
+            row_number=2,
+            date=date(2026, 1, 5),
+            change=Decimal('-20.00'),
+            category=exchange,
+            comment='Buy giftcard: Coles',
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=buy,
+            source=self.source,
+            amount=Decimal('20.00'),
+            row_number=2,
+        )
+        card = Giftcard.objects.create(
+            user=self.user,
+            row_number=1,
+            shop='Coles',
+            date=date(2026, 1, 5),
+            balance=Decimal('20.00'),
+        )
+
+        after_buy = get_dashboard_data(user=self.user)
+        self.assertEqual(after_buy['summary']['netWorth'], 100.0)
+        self.assertEqual(after_buy['summary']['income'], 100.0)
+        self.assertEqual(after_buy['summary']['expense'], 0.0)
+        self.assertEqual(after_buy['summary']['saving'], 100.0)
+        self.assertEqual(
+            [row['subCategory'] for row in after_buy['expenseBreakdown']],
+            [],
+        )
+
+        use = Transaction.objects.create(
+            user=self.user,
+            row_number=3,
+            date=date(2026, 1, 10),
+            change=Decimal('-20.00'),
+            category=self.groceries,
+            comment='Use giftcard: Coles',
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=use,
+            giftcard=card,
+            amount=Decimal('20.00'),
+            row_number=1,
+        )
+        card.balance = Decimal('0.00')
+        card.save(update_fields=['balance'])
+
+        after_use = get_dashboard_data(user=self.user)
+        self.assertEqual(after_use['summary']['netWorth'], 80.0)
+        self.assertEqual(after_use['summary']['income'], 100.0)
+        self.assertEqual(after_use['summary']['expense'], -20.0)
+        self.assertEqual(after_use['summary']['saving'], 80.0)
+        self.assertEqual(
+            after_use['expenseBreakdown'],
+            [
+                {
+                    'subCategory': 'Groceries',
+                    'amounts': {
+                        '2025/11': 0.0,
+                        '2025/12': 0.0,
+                        '2026/01': -20.0,
+                    },
+                }
+            ],
+        )
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    def test_mixed_cash_and_giftcard_spend_counts_once(self, _localdate):
+        exchange = Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        self.add_transaction(1, date(2026, 1, 2), '100.00', self.salary)
+        buy = Transaction.objects.create(
+            user=self.user,
+            row_number=2,
+            date=date(2026, 1, 5),
+            change=Decimal('-20.00'),
+            category=exchange,
+            comment='Buy giftcard: Coles',
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=buy,
+            source=self.source,
+            amount=Decimal('20.00'),
+            row_number=2,
+        )
+        card = Giftcard.objects.create(
+            user=self.user,
+            row_number=1,
+            shop='Coles',
+            date=date(2026, 1, 5),
+            balance=Decimal('20.00'),
+        )
+
+        spend = Transaction.objects.create(
+            user=self.user,
+            row_number=3,
+            date=date(2026, 1, 12),
+            change=Decimal('-50.00'),
+            category=self.groceries,
+            comment='Weekly shop',
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=spend,
+            source=self.source,
+            amount=Decimal('30.00'),
+            row_number=3,
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=spend,
+            giftcard=card,
+            amount=Decimal('20.00'),
+            row_number=2,
+        )
+        card.balance = Decimal('0.00')
+        card.save(update_fields=['balance'])
+
+        data = get_dashboard_data(user=self.user)
+        self.assertEqual(data['summary']['netWorth'], 50.0)
+        self.assertEqual(data['summary']['expense'], -50.0)
+
+    def test_source_history_excludes_giftcard_only_shop_name(self):
+        from finance.db_reader import get_transaction_data
+
+        self.add_transaction(1, date(2026, 1, 2), '40.00', self.salary)
+        card = Giftcard.objects.create(
+            user=self.user,
+            row_number=1,
+            shop='Everyday',
+            date=date(2026, 1, 3),
+            balance=Decimal('0.00'),
+        )
+        use = Transaction.objects.create(
+            user=self.user,
+            row_number=2,
+            date=date(2026, 1, 4),
+            change=Decimal('-15.00'),
+            category=self.groceries,
+            comment='Use giftcard: Everyday',
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=use,
+            giftcard=card,
+            amount=Decimal('15.00'),
+            row_number=1,
+        )
+
+        data = get_transaction_data(user=self.user, source='Everyday')
+        self.assertEqual(len(data['rows']), 1)
+        self.assertEqual(data['rows'][0]['Change'], 40.0)
 
 
 class DashboardApiTests(TestCase):
@@ -1253,6 +1426,19 @@ class FundingTests(TestCase):
             validate_giftcard_debit('10.00', '10.50')
         self.assertIn('exceeds giftcard balance', str(ctx.exception))
 
+    def test_net_giftcard_debits_credits_and_debits_difference(self):
+        from finance.funding import net_giftcard_debits
+
+        deltas = net_giftcard_debits(
+            [{'giftcard_id': 'aaa', 'amount': '10'}],
+            previous_payments=[
+                {'giftcard_id': 'aaa', 'amount': '20'},
+                {'giftcard_id': 'bbb', 'amount': '5'},
+            ],
+        )
+        self.assertEqual(deltas['aaa'], Decimal('-10'))
+        self.assertEqual(deltas['bbb'], Decimal('-5'))
+
 
 class GiftcardDebitWriteTests(TestCase):
     def setUp(self):
@@ -1376,3 +1562,195 @@ class GiftcardDebitWriteTests(TestCase):
         )
         self.giftcard.refresh_from_db()
         self.assertEqual(self.giftcard.balance, Decimal('20.00'))
+
+    def test_plan_giftcard_debits_credits_previous_payment_on_edit(self):
+        # $40 card already reduced by this transaction's $20 giftcard payment.
+        self.giftcard.balance = Decimal('20.00')
+        self.giftcard.save(update_fields=['balance'])
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        gid = str(self.giftcard.id)
+        planned = client.plan_giftcard_debits(
+            [{'giftcard_id': gid, 'amount': '10'}],
+            previous_payments=[{'giftcard_id': gid, 'amount': '20'}],
+        )
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0]['amount'], -10.0)
+        self.assertEqual(planned[0]['new_balance'], 30.0)
+
+    def test_plan_giftcard_debits_edit_overspend_uses_remaining_balance(self):
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        gid = str(self.giftcard.id)
+        with self.assertRaises(SheetsError) as ctx:
+            client.plan_giftcard_debits(
+                [{'giftcard_id': gid, 'amount': '50'}],
+                previous_payments=[{'giftcard_id': gid, 'amount': '5'}],
+            )
+        self.assertIn('exceeds giftcard balance', str(ctx.exception))
+
+    def test_update_transaction_detail_moves_giftcard_balance(self):
+        from finance.db_writer import update_transaction_detail
+
+        gid = str(self.giftcard.id)
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=8,
+            date=date(2026, 1, 10),
+            change=Decimal('-20.00'),
+            category=self.groceries,
+            comment='Use giftcard: Coles',
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=tx,
+            giftcard=self.giftcard,
+            amount=Decimal('20.00'),
+            row_number=8,
+        )
+        self.giftcard.balance = Decimal('20.00')
+        self.giftcard.save(update_fields=['balance'])
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-10',
+            change='-10.00',
+            comment='Use giftcard: Coles',
+            sub_category='Groceries',
+            payments=[],
+            giftcard_payments=[
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': gid,
+                    'amount': '10.00',
+                    'row_number': 9,
+                }
+            ],
+            giftcard_debits=[{'giftcard_id': gid, 'new_balance': '30.00'}],
+        )
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('30.00'))
+        self.assertEqual(tx.giftcard_payments.get().amount, Decimal('10.00'))
+
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_rows')
+    def test_buy_giftcard_records_transfer_not_expense(
+        self, append_rows, append_funding
+    ):
+        Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        append_rows.side_effect = [[4], [5]]
+        append_funding.return_value = (
+            [
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': 20.0,
+                    'row_number': 6,
+                }
+            ],
+            [],
+        )
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        result = client.buy_giftcard(
+            shop='Coles',
+            date='2026-01-05',
+            balance=20,
+            source='Everyday',
+        )
+        self.assertEqual(result['balance'], 20)
+        tx_values = append_rows.call_args_list[1].args[2][0]
+        self.assertEqual(tx_values[2], -20)
+        self.assertEqual(tx_values[4], 'Exchange (self)')
+        tx = Transaction.objects.get(user=self.user, comment='Buy giftcard: Coles')
+        self.assertEqual(tx.change, Decimal('-20.00'))
+        self.assertEqual(tx.category.sub_category, 'Exchange (self)')
+        self.assertEqual(tx.category.type, '')
+        card = Giftcard.objects.get(pk=result['giftcardId'])
+        self.assertEqual(card.balance, Decimal('20.00'))
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    def test_save_giftcard_purchase_and_use_single_count_dashboard(self, _localdate):
+        from finance import db_writer
+
+        self.giftcard.balance = Decimal('0.00')
+        self.giftcard.save(update_fields=['balance'])
+
+        Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        salary = Category.objects.create(
+            user=self.user,
+            main_category='Earnings',
+            sub_category='Salary',
+            type='Income',
+        )
+        income_tx = Transaction.objects.create(
+            user=self.user,
+            row_number=10,
+            date=date(2026, 1, 2),
+            change=Decimal('100.00'),
+            category=salary,
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=income_tx,
+            source=self.source,
+            amount=Decimal('100.00'),
+            row_number=10,
+        )
+        giftcard_id = str(uuid.uuid4())
+        buy_tx_id = str(uuid.uuid4())
+        db_writer.save_giftcard_purchase(
+            user=self.user,
+            giftcard_id=giftcard_id,
+            shop='Coles',
+            date='2026-01-05',
+            balance='20.00',
+            row_number=11,
+            transaction={
+                'transaction_id': buy_tx_id,
+                'date': '2026-01-05',
+                'change': '-20.00',
+                'comment': 'Buy giftcard: Coles',
+                'sub_category': 'Exchange (self)',
+                'row_number': 12,
+            },
+            payment={
+                'payment_id': str(uuid.uuid4()),
+                'source': 'Everyday',
+                'amount': '20.00',
+                'row_number': 13,
+            },
+        )
+        after_buy = get_dashboard_data(user=self.user)
+        self.assertEqual(after_buy['summary']['netWorth'], 100.0)
+        self.assertEqual(after_buy['summary']['expense'], 0.0)
+
+        db_writer.save_giftcard_use(
+            user=self.user,
+            giftcard_id=giftcard_id,
+            new_balance='0.00',
+            date='2026-01-10',
+            change='-20.00',
+            comment='Use giftcard: Coles',
+            sub_category='Groceries',
+            row_number=14,
+            transaction_id=str(uuid.uuid4()),
+            giftcard_payment={
+                'giftcard_payment_id': str(uuid.uuid4()),
+                'giftcard_id': giftcard_id,
+                'amount': '20.00',
+                'row_number': 15,
+            },
+        )
+        after_use = get_dashboard_data(user=self.user)
+        self.assertEqual(after_use['summary']['netWorth'], 80.0)
+        self.assertEqual(after_use['summary']['expense'], -20.0)
+        self.assertEqual(Giftcard.objects.get(pk=giftcard_id).balance, Decimal('0.00'))
