@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Field, inputClass, selectClass } from './FormField';
+import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { addReceipt, extractReceiptFromImage, getGiftcards } from '../lib/api';
 import { fileToDataUrl } from '../lib/imageUtils';
 import { formatAUD } from '../lib/transform';
@@ -348,11 +348,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                     </select>
                   </Field>
                   <Field label="Amount">
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="0.01"
-                      min="0"
+                    <DecimalInput
                       placeholder="0.00"
                       value={s.amount}
                       onChange={(e) => updateSource(i, { amount: e.target.value })}
@@ -414,12 +410,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                       </select>
                     </Field>
                     <Field label="Amount">
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="0.01"
-                        min="0"
-                        max={maxBalance || undefined}
+                      <DecimalInput
                         placeholder="0.00"
                         value={p.amount}
                         onChange={(e) => updateGiftcardPayment(i, { amount: e.target.value })}
@@ -471,15 +462,12 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                   />
                 </Field>
                 <Field label="Amount">
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
-                    min="0"
+                  <DecimalInput
                     placeholder="0"
                     value={it.amount}
                     onChange={(e) => updateItem(i, { amount: e.target.value })}
                     className={inputClass}
+                    maxFractionDigits={null}
                   />
                 </Field>
                 <Field label="Unit">
@@ -497,11 +485,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                   </select>
                 </Field>
                 <Field label="Money">
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="0.01"
-                    min="0"
+                  <DecimalInput
                     placeholder="0.00"
                     value={it.money}
                     onChange={(e) => updateItem(i, { money: e.target.value })}

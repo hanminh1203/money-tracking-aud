@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import Card from '../components/Card';
-import { Field, inputClass, selectClass } from '../components/FormField';
+import { DecimalInput, Field, inputClass, selectClass } from '../components/FormField';
 import PageHeader from '../components/PageHeader';
 import ReceiptItemsEditor, {
   emptyReceiptItem,
@@ -337,10 +337,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                           </option>
                         ))}
                       </select>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
+                      <DecimalInput
                         value={p.amount}
                         onChange={(e) =>
                           setPayments((prev) =>
@@ -407,11 +404,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                               </option>
                             ))}
                           </select>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            max={selected?.balance > 0 ? selected.balance : undefined}
+                          <DecimalInput
                             value={p.amount}
                             onChange={(e) =>
                               setGiftcardPayments((prev) =>
@@ -455,11 +448,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
 
             {!hasReceipt && (
               <Field label="Amount (AUD)">
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  step="0.01"
-                  min="0"
+                <DecimalInput
                   placeholder="0.00"
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}

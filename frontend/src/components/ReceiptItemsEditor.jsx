@@ -1,4 +1,4 @@
-import { Field, inputClass, selectClass } from './FormField';
+import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { formatAUD } from '../lib/transform';
 
 const DEFAULT_UNITS = ['kg', 'g', 'ml', 'l', 'piece'];
@@ -62,15 +62,12 @@ export default function ReceiptItemsEditor({ items, onChange, total }) {
               />
             </Field>
             <Field label="Amount">
-              <input
-                type="number"
-                inputMode="decimal"
-                step="any"
-                min="0"
+              <DecimalInput
                 placeholder="0"
                 value={it.amount}
                 onChange={(e) => updateItem(i, { amount: e.target.value })}
                 className={inputClass}
+                maxFractionDigits={null}
               />
             </Field>
             <Field label="Unit">
@@ -88,11 +85,7 @@ export default function ReceiptItemsEditor({ items, onChange, total }) {
               </select>
             </Field>
             <Field label="Money">
-              <input
-                type="number"
-                inputMode="decimal"
-                step="0.01"
-                min="0"
+              <DecimalInput
                 placeholder="0.00"
                 value={it.money}
                 onChange={(e) => updateItem(i, { money: e.target.value })}

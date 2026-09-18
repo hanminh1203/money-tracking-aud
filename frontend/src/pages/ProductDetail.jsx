@@ -4,7 +4,7 @@ import Card from '../components/Card';
 import Modal from '../components/Modal';
 import PageHeader, { PageActions } from '../components/PageHeader';
 import StatCard from '../components/StatCard';
-import { Field, inputClass } from '../components/FormField';
+import { DecimalInput, Field, inputClass } from '../components/FormField';
 import {
   createProductItem,
   deleteProductItem,
@@ -599,11 +599,8 @@ function AttachPurchaseModal({ open, onClose, productId, onAttached }) {
 
         {linkType === 'transaction' && selected && (
           <Field label="Price (required for transactions)">
-            <input
+            <DecimalInput
               className={inputClass}
-              type="number"
-              min="0"
-              step="0.01"
               value={price}
               onChange={(e) => setPrice(e.target.value)}
               required

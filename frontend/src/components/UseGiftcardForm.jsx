@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Field, inputClass, selectClass } from './FormField';
+import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { useGiftcard } from '../lib/api';
 import { formatAUD } from '../lib/transform';
 
@@ -59,12 +59,7 @@ export default function UseGiftcardForm({ giftcard, metadata, onSaved, onClose }
       </p>
 
       <Field label="Amount (AUD)">
-        <input
-          type="number"
-          inputMode="decimal"
-          step="0.01"
-          min="0"
-          max={maxBalance || undefined}
+        <DecimalInput
           placeholder="0.00"
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
