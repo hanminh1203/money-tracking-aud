@@ -40,6 +40,18 @@ export function formatDateShort(date) {
 }
 
 /**
+ * Calendar date in the runtime's local timezone as `yyyy-MM-dd`.
+ * Do not use `Date#toISOString().slice(0, 10)` — that is UTC and is a day
+ * behind in Australia (e.g. Perth UTC+8) during morning hours.
+ */
+export function localDateIso(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
  * Normalizes raw transaction rows into a consistent shape.
  * Joins Main Category / Type from metadata categories by sub category.
  */

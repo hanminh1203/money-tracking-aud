@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date as date_cls
 from typing import Any
 
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 from finance import db_writer
 
@@ -1464,7 +1464,7 @@ class SheetsClient:
 
         new_balance = round((current - abs_amt) * 100) / 100
         note = (comment or '').strip() or f'Use giftcard: {card.shop}'
-        date = date_cls.today().isoformat()
+        date = timezone.localdate().isoformat()
 
         transaction_id = str(uuid.uuid4())
         tx_row_numbers = self.append_rows(

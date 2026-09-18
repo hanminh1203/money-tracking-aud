@@ -12,20 +12,13 @@ import {
   getProductCandidates,
   updateProductItem,
 } from '../lib/api';
-import { formatAUD, formatDateShort, parseDate } from '../lib/transform';
+import { formatAUD, formatDateShort, localDateIso, parseDate } from '../lib/transform';
 
 function parseIsoDate(value) {
   if (!value) return null;
   const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (match) return new Date(+match[1], +match[2] - 1, +match[3]);
   return parseDate(value);
-}
-
-function localDateIso(date = new Date()) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
 }
 
 function daysBetween(fromValue, toValue) {

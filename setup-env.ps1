@@ -118,6 +118,7 @@ $BackendSecrets = @(
 
 $BackendDefaults = @{
   DJANGO_DEBUG              = 'true'
+  DJANGO_TIME_ZONE          = 'Australia/Perth'
   ALLOWED_HOSTS             = 'localhost,127.0.0.1,.vercel.app'
   CSRF_TRUSTED_ORIGINS      = 'http://localhost:5173,http://127.0.0.1:5173'
   GOOGLE_REDIRECT_URI       = 'http://localhost:5173/api/auth/google/callback'

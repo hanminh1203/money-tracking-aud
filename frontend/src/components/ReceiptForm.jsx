@@ -2,11 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { addReceipt, extractReceiptFromImage, getGiftcards } from '../lib/api';
 import { fileToDataUrl } from '../lib/imageUtils';
-import { formatAUD } from '../lib/transform';
+import { formatAUD, localDateIso } from '../lib/transform';
 
 const UNITS = ['kg', 'g', 'ml', 'l', 'piece'];
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
 const emptySource = () => ({ source: '', amount: '' });
 const emptyGiftcardPayment = () => ({ giftcardId: '', amount: '' });
 const emptyItem = () => ({ name: '', amount: '', unit: 'piece', money: '' });
@@ -17,7 +16,7 @@ const primaryClass = 'btn-primary';
 
 export default function ReceiptForm({ metadata, onSaved, onClose }) {
   const [store, setStore] = useState('');
-  const [date, setDate] = useState(todayISO());
+  const [date, setDate] = useState(localDateIso());
   const [subCategory, setSubCategory] = useState('');
   const [comment, setComment] = useState('');
   const [sources, setSources] = useState([emptySource()]);
@@ -138,7 +137,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
 
   function resetForm() {
     setStore('');
-    setDate(todayISO());
+    setDate(localDateIso());
     setSubCategory('');
     setComment('');
     setSources([emptySource()]);

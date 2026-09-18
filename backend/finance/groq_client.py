@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
 from typing import Any
 
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
 RECEIPT_UNITS = ['kg', 'g', 'ml', 'l', 'piece']
@@ -62,7 +62,7 @@ def parse_finance_message(message: str, metadata: dict) -> dict:
         f"{c['mainCategory']} > {c['subCategory']} ({c['type']})"
         for c in metadata.get('categories') or []
     ]
-    today = date.today().isoformat()
+    today = timezone.localdate().isoformat()
 
     system_prompt = f"""You are a finance assistant that extracts structured transaction data from natural language.
 Return ONLY valid JSON (no markdown, no extra text) matching exactly one of these schemas:
@@ -125,7 +125,7 @@ def extract_receipt_from_image(image_data_url: str, metadata: dict) -> dict:
         c for c in (metadata.get('categories') or []) if c.get('type') == 'Expense'
     ]
     category_list = [f"{c['mainCategory']} > {c['subCategory']}" for c in expense_categories]
-    today = date.today().isoformat()
+    today = timezone.localdate().isoformat()
 
     system_prompt = f"""You extract structured receipt data from a receipt photo.
 Return ONLY valid JSON matching this schema:
