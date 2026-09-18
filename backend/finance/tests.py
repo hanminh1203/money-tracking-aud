@@ -15,7 +15,12 @@ from finance.db_reader import (
     get_transaction,
 )
 from finance.db_sync import SyncError, compare_mirror, sync_from_sheets
-from finance.db_writer import save_product_item, update_product_item
+from finance.db_writer import (
+    reconcile_receipt_items,
+    save_product_item,
+    update_product_item,
+    update_transaction_detail,
+)
 from finance.models import (
     Category,
     Giftcard,
@@ -783,6 +788,302 @@ class TransactionDetailTests(TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].name, 'Eggs')
         self.assertEqual(items[0].money, Decimal('10'))
+
+    def _receipt_tx_with_items(self, item_specs):
+        tx = self.add_transaction()
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=tx,
+            date=date(2026, 1, 8),
+            total=sum((spec['money'] for spec in item_specs), Decimal('0')),
+        )
+        items = [
+            ReceiptItem.objects.create(
+                user=self.user,
+                receipt=receipt,
+                name=spec['name'],
+                amount=spec['amount'],
+                unit=spec['unit'],
+                money=spec['money'],
+            )
+            for spec in item_specs
+        ]
+        return tx, receipt, items
+
+    def test_update_preserves_product_link_when_item_fields_change(self):
+        tx, _receipt, (milk,) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('2'),
+                    'unit': 'L',
+                    'money': Decimal('4.50'),
+                }
+            ]
+        )
+        product = Product.objects.create(user=self.user, name='Milk')
+        product_item = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=milk,
+            end_date=date(2026, 3, 1),
+        )
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-09',
+            change='-6.00',
+            comment='Coles : restock',
+            sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '6.00', 'row_number': 1}],
+            receipt_total='6.00',
+            items=[
+                {
+                    'id': str(milk.id),
+                    'name': 'Organic Milk',
+                    'amount': 3,
+                    'unit': 'L',
+                    'money': 6,
+                }
+            ],
+        )
+
+        milk.refresh_from_db()
+        product_item.refresh_from_db()
+        self.assertEqual(milk.name, 'Organic Milk')
+        self.assertEqual(milk.amount, Decimal('3'))
+        self.assertEqual(milk.money, Decimal('6'))
+        self.assertEqual(product_item.receipt_item_id, milk.id)
+        self.assertEqual(ProductItem.objects.filter(pk=product_item.id).count(), 1)
+        data = get_transaction(user=self.user, transaction_id=str(tx.id))
+        self.assertEqual(data['receipt']['items'][0]['id'], str(milk.id))
+        self.assertEqual(data['receipt']['items'][0]['productId'], str(product.id))
+
+    def test_update_preserves_product_link_when_unrelated_item_added(self):
+        tx, receipt, (milk,) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('2'),
+                    'unit': 'L',
+                    'money': Decimal('4.50'),
+                }
+            ]
+        )
+        product = Product.objects.create(user=self.user, name='Milk')
+        product_item = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=milk,
+        )
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-08',
+            change='-10.00',
+            comment='Woolworths : weekly shop',
+            sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '10.00', 'row_number': 1}],
+            receipt_total='10.00',
+            items=[
+                {
+                    'id': str(milk.id),
+                    'name': 'Milk',
+                    'amount': 2,
+                    'unit': 'L',
+                    'money': 4.5,
+                },
+                {'name': 'Eggs', 'amount': 12, 'unit': 'piece', 'money': 5.5},
+            ],
+        )
+
+        product_item.refresh_from_db()
+        items = list(ReceiptItem.objects.filter(receipt=receipt).order_by('name'))
+        self.assertEqual({it.name for it in items}, {'Eggs', 'Milk'})
+        self.assertEqual(product_item.receipt_item_id, milk.id)
+        self.assertTrue(ReceiptItem.objects.filter(pk=milk.id).exists())
+        eggs = next(it for it in items if it.name == 'Eggs')
+        self.assertNotEqual(eggs.id, milk.id)
+        self.assertEqual(eggs.product_items.count(), 0)
+
+    def test_update_preserves_product_link_when_id_omitted_and_fields_change(self):
+        tx, _receipt, (milk,) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('2'),
+                    'unit': 'L',
+                    'money': Decimal('4.50'),
+                }
+            ]
+        )
+        product = Product.objects.create(user=self.user, name='Milk')
+        product_item = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=milk,
+        )
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-08',
+            change='-6.00',
+            comment='Woolworths : weekly shop',
+            sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '6.00', 'row_number': 1}],
+            receipt_total='6.00',
+            items=[{'name': 'Organic Milk', 'amount': 3, 'unit': 'L', 'money': 6}],
+        )
+
+        milk.refresh_from_db()
+        product_item.refresh_from_db()
+        self.assertEqual(milk.name, 'Organic Milk')
+        self.assertEqual(product_item.receipt_item_id, milk.id)
+
+    def test_update_drops_product_link_when_linked_item_removed(self):
+        """Removing a linked line deletes that ReceiptItem and CASCADE ProductItems.
+
+        Surviving lines keep their ids and product attachments. Sheets Product_Items
+        rows for the removed receipt item id are deleted in update_transaction so
+        Sync is not left pointing at a missing Receipt_Items row.
+        """
+        tx, receipt, (milk, bread) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('2'),
+                    'unit': 'L',
+                    'money': Decimal('4.50'),
+                },
+                {
+                    'name': 'Bread',
+                    'amount': Decimal('1'),
+                    'unit': 'loaf',
+                    'money': Decimal('8.00'),
+                },
+            ]
+        )
+        product = Product.objects.create(user=self.user, name='Milk')
+        product_item = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=milk,
+        )
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-08',
+            change='-8.00',
+            comment='Woolworths : weekly shop',
+            sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '8.00', 'row_number': 1}],
+            receipt_total='8.00',
+            items=[
+                {
+                    'id': str(bread.id),
+                    'name': 'Bread',
+                    'amount': 1,
+                    'unit': 'loaf',
+                    'money': 8,
+                }
+            ],
+        )
+
+        self.assertFalse(ReceiptItem.objects.filter(pk=milk.id).exists())
+        self.assertFalse(ProductItem.objects.filter(pk=product_item.id).exists())
+        self.assertTrue(ReceiptItem.objects.filter(pk=bread.id, receipt=receipt).exists())
+        self.assertEqual(receipt.items.count(), 1)
+
+    def test_reconcile_receipt_items_keeps_id_when_order_changes(self):
+        _tx, receipt, (milk, bread) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('1'),
+                    'unit': 'L',
+                    'money': Decimal('4.00'),
+                },
+                {
+                    'name': 'Bread',
+                    'amount': Decimal('1'),
+                    'unit': 'loaf',
+                    'money': Decimal('3.00'),
+                },
+            ]
+        )
+        resolved, removed = reconcile_receipt_items(
+            list(receipt.items.all()),
+            [
+                {'id': str(bread.id), 'name': 'Bread', 'amount': 1, 'unit': 'loaf', 'money': 3},
+                {'id': str(milk.id), 'name': 'Milk', 'amount': 2, 'unit': 'L', 'money': 5},
+            ],
+            receipt_id=receipt.id,
+        )
+        self.assertEqual([row['id'] for row in resolved], [str(bread.id), str(milk.id)])
+        self.assertEqual(removed, [])
+        self.assertEqual(resolved[1]['amount'], 2)
+
+    @patch.object(SheetsClient, 'find_matching_sheet_rows_for_values', return_value=[40])
+    @patch.object(SheetsClient, 'find_matching_sheet_row_map')
+    @patch.object(SheetsClient, 'append_rows')
+    @patch.object(SheetsClient, 'delete_table_rows_at')
+    @patch.object(SheetsClient, 'update_table_row_at')
+    def test_sheet_receipt_items_update_by_id_and_drop_removed_product_rows(
+        self,
+        update_row,
+        delete_rows,
+        append_rows,
+        row_map,
+        product_rows,
+    ):
+        milk_id = str(uuid.uuid4())
+        bread_id = str(uuid.uuid4())
+        eggs_id = str(uuid.uuid4())
+        row_map.return_value = {milk_id: 10, bread_id: 11}
+        client = SheetsClient('token', 'sheet-id', user=self.user)
+
+        client._sync_receipt_item_sheet_rows(
+            receipt_id='receipt-1',
+            items=[
+                {
+                    'id': bread_id,
+                    'name': 'Bread',
+                    'amount': 1,
+                    'unit': 'loaf',
+                    'money': 4,
+                },
+                {
+                    'id': eggs_id,
+                    'name': 'Eggs',
+                    'amount': 12,
+                    'unit': 'piece',
+                    'money': 6,
+                },
+            ],
+            removed_item_ids=[milk_id],
+        )
+
+        updated_ids = [
+            call.kwargs['values_by_column']['Receipt Item ID']
+            for call in update_row.call_args_list
+        ]
+        self.assertEqual(updated_ids, [bread_id])
+        self.assertEqual(update_row.call_args.kwargs['sheet_row'], 11)
+        append_rows.assert_called_once()
+        appended = append_rows.call_args.args[2]
+        self.assertEqual(appended[0][0], eggs_id)
+        deleted_row_groups = [call.args[1] for call in delete_rows.call_args_list]
+        self.assertIn([10], deleted_row_groups)
+        self.assertIn([40], deleted_row_groups)
+        product_rows.assert_called_once()
+        self.assertEqual(
+            set(product_rows.call_args.kwargs['match_values']),
+            {milk_id},
+        )
 
     @patch('finance.api_views.sheets_for')
     @patch('finance.api_views.oauth.get_finance_user')

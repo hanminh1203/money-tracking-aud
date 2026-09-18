@@ -611,6 +611,127 @@ class SheetsClient:
                 rows.append(start_row + i)
         return rows
 
+    def find_matching_sheet_row_map(
+        self,
+        table_name: str,
+        *,
+        match_column: str,
+        match_value: str,
+        key_column: str,
+    ) -> dict[str, int]:
+        """Map key_column value → sheet row for rows matching match_column."""
+        table = self.get_table(table_name)
+        headers = [c['name'] for c in table['columns']]
+        match_idx = self.find_col(headers, rf'^{re.escape(match_column)}$')
+        key_idx = self.find_col(headers, rf'^{re.escape(key_column)}$')
+        if match_idx < 0:
+            raise SheetsError(f'Column "{match_column}" not found in table "{table_name}"')
+        if key_idx < 0:
+            raise SheetsError(f'Column "{key_column}" not found in table "{table_name}"')
+
+        values = self.get_values(self.data_range_a1(table))
+        start_row = table['range']['startRowIndex'] + 2
+        mapping: dict[str, int] = {}
+        for i, row in enumerate(values):
+            cell = row[match_idx] if match_idx < len(row) else None
+            if str(cell or '').strip() != str(match_value).strip():
+                continue
+            key = str(row[key_idx] if key_idx < len(row) else '').strip()
+            if key and key not in mapping:
+                mapping[key] = start_row + i
+        return mapping
+
+    def find_matching_sheet_rows_for_values(
+        self,
+        table_name: str,
+        *,
+        match_column: str,
+        match_values: list[Any] | set[Any],
+    ) -> list[int]:
+        """Return 1-based sheet rows whose column is in match_values."""
+        wanted = {str(value).strip() for value in match_values if str(value).strip()}
+        if not wanted:
+            return []
+        table = self.get_table(table_name)
+        headers = [c['name'] for c in table['columns']]
+        match_idx = self.find_col(headers, rf'^{re.escape(match_column)}$')
+        if match_idx < 0:
+            raise SheetsError(f'Column "{match_column}" not found in table "{table_name}"')
+
+        values = self.get_values(self.data_range_a1(table))
+        start_row = table['range']['startRowIndex'] + 2
+        rows: list[int] = []
+        for i, row in enumerate(values):
+            cell = row[match_idx] if match_idx < len(row) else None
+            if str(cell or '').strip() in wanted:
+                rows.append(start_row + i)
+        return rows
+
+    def _sync_receipt_item_sheet_rows(
+        self,
+        *,
+        receipt_id: str,
+        items: list[dict],
+        removed_item_ids: list[Any],
+    ) -> None:
+        """Update Receipt_Items by id and drop Product_Items for removed lines."""
+        rid = str(receipt_id)
+        row_by_id = self.find_matching_sheet_row_map(
+            settings.RECEIPT_ITEMS_TABLE,
+            match_column='Receipt ID',
+            match_value=rid,
+            key_column='Receipt Item ID',
+        )
+        to_append: list[list] = []
+        for it in items:
+            item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
+            it['id'] = item_id
+            sheet_row = row_by_id.pop(item_id, None)
+            values_by_column = {
+                'Receipt Item ID': item_id,
+                'Receipt ID': rid,
+                'Name': it['name'],
+                'Amount': it['amount'],
+                'Unit': it['unit'],
+                'Money': it['money'],
+            }
+            if sheet_row is not None:
+                self.update_table_row_at(
+                    settings.RECEIPT_ITEMS_TABLE,
+                    sheet_row=sheet_row,
+                    values_by_column=values_by_column,
+                )
+            else:
+                to_append.append(
+                    [
+                        item_id,
+                        rid,
+                        it['name'],
+                        it['amount'],
+                        it['unit'],
+                        it['money'],
+                    ]
+                )
+        if to_append:
+            self.append_rows(
+                settings.RECEIPT_ITEMS_TABLE,
+                RECEIPT_ITEM_COLUMNS,
+                to_append,
+            )
+        extra_old = list(row_by_id.values())
+        if extra_old:
+            self.delete_table_rows_at(settings.RECEIPT_ITEMS_TABLE, extra_old)
+
+        stale_ids = {str(item_id).strip() for item_id in removed_item_ids if str(item_id).strip()}
+        stale_ids.update(row_by_id.keys())
+        product_rows = self.find_matching_sheet_rows_for_values(
+            settings.PRODUCT_ITEMS_TABLE,
+            match_column='Receipt Item ID',
+            match_values=stale_ids,
+        )
+        if product_rows:
+            self.delete_table_rows_at(settings.PRODUCT_ITEMS_TABLE, product_rows)
+
     def update_table_row_at(
         self,
         table_name: str,
@@ -1202,16 +1323,16 @@ class SheetsClient:
                     raise SheetsError(f'Item {i + 1}: unit is required')
                 if not money:
                     raise SheetsError(f'Item {i + 1}: invalid money')
-                item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
-                normalized_items.append(
-                    {
-                        'id': item_id,
-                        'name': name,
-                        'amount': item_amount,
-                        'unit': unit,
-                        'money': money,
-                    }
-                )
+                item_payload = {
+                    'name': name,
+                    'amount': item_amount,
+                    'unit': unit,
+                    'money': money,
+                }
+                item_id = str(it.get('id') or '').strip()
+                if item_id:
+                    item_payload['id'] = item_id
+                normalized_items.append(item_payload)
             if not normalized_items:
                 raise SheetsError('At least one item is required')
             total = round(sum(it['money'] for it in normalized_items) * 100) / 100
@@ -1294,49 +1415,21 @@ class SheetsClient:
                 },
             )
 
-            item_rows = self.find_matching_sheet_rows(
-                settings.RECEIPT_ITEMS_TABLE,
-                match_column='Receipt ID',
-                match_value=str(linked_receipt.id),
+            from finance.models import ReceiptItem
+
+            existing_items = list(
+                ReceiptItem.objects.filter(receipt=linked_receipt, user=self.user)
             )
-            rid = str(linked_receipt.id)
-            overlapping = min(len(item_rows), len(normalized_items or []))
-            for i in range(overlapping):
-                it = normalized_items[i]
-                item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
-                it['id'] = item_id
-                self.update_table_row_at(
-                    settings.RECEIPT_ITEMS_TABLE,
-                    sheet_row=item_rows[i],
-                    values_by_column={
-                        'Receipt Item ID': item_id,
-                        'Receipt ID': rid,
-                        'Name': it['name'],
-                        'Amount': it['amount'],
-                        'Unit': it['unit'],
-                        'Money': it['money'],
-                    },
-                )
-            extra_new = (normalized_items or [])[overlapping:]
-            if extra_new:
-                self.append_rows(
-                    settings.RECEIPT_ITEMS_TABLE,
-                    RECEIPT_ITEM_COLUMNS,
-                    [
-                        [
-                            str(it.get('id') or uuid.uuid4()),
-                            rid,
-                            it['name'],
-                            it['amount'],
-                            it['unit'],
-                            it['money'],
-                        ]
-                        for it in extra_new
-                    ],
-                )
-            extra_old = item_rows[overlapping:]
-            if extra_old:
-                self.delete_table_rows_at(settings.RECEIPT_ITEMS_TABLE, extra_old)
+            normalized_items, removed_item_ids = db_writer.reconcile_receipt_items(
+                existing_items,
+                normalized_items or [],
+                receipt_id=linked_receipt.id,
+            )
+            self._sync_receipt_item_sheet_rows(
+                receipt_id=str(linked_receipt.id),
+                items=normalized_items,
+                removed_item_ids=removed_item_ids,
+            )
 
         db_writer.update_transaction_detail(
             user=self.user,
