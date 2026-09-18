@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Field, inputClass, selectClass } from './FormField';
+import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { addTransaction, getGiftcards } from '../lib/api';
 import { formatAUD } from '../lib/transform';
 
@@ -200,11 +200,7 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputClass} required />
         </Field>
         <Field label="Amount (AUD)">
-          <input
-            type="number"
-            inputMode="decimal"
-            step="0.01"
-            min="0"
+          <DecimalInput
             placeholder="0.00"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
@@ -262,11 +258,7 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
                   </select>
                 </Field>
                 <Field label="Amount">
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="0.01"
-                    min="0"
+                  <DecimalInput
                     placeholder="0.00"
                     value={p.amount}
                     onChange={(e) => updatePayment(i, { amount: e.target.value })}
@@ -330,12 +322,7 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
                       </select>
                     </Field>
                     <Field label="Amount">
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="0.01"
-                        min="0"
-                        max={maxBalance || undefined}
+                      <DecimalInput
                         placeholder="0.00"
                         value={p.amount}
                         onChange={(e) => updateGiftcardPayment(i, { amount: e.target.value })}

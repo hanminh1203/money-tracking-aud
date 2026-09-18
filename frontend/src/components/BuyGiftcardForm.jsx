@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Field, inputClass, selectClass } from './FormField';
+import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { buyGiftcard } from '../lib/api';
 import { formatAUD } from '../lib/transform';
 
@@ -69,11 +69,7 @@ export default function BuyGiftcardForm({ metadata, balances, onSaved, onClose }
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputClass} required />
         </Field>
         <Field label="Balance (AUD)">
-          <input
-            type="number"
-            inputMode="decimal"
-            step="0.01"
-            min="0"
+          <DecimalInput
             placeholder="0.00"
             value={balance}
             onChange={(e) => setBalance(e.target.value)}
