@@ -34,6 +34,7 @@ from .db_reader import (
     search_link_candidates,
 )
 from .db_sync import SyncError, compare_mirror, sync_from_sheets
+from .db_writer import DualWriteError
 from .groq_client import GroqError, extract_receipt_from_image, parse_finance_message
 from .models import User
 from .sheets_client import SheetsClient, SheetsError
@@ -45,6 +46,17 @@ def json_error(message: str, status: int = 400) -> JsonResponse:
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
     return JsonResponse({'error': message}, status=status)
+
+
+def json_sheets_write_error(exc: Exception) -> JsonResponse:
+    """JSON error for Sheets writes and Postgres dual-write failures."""
+    if isinstance(exc, DualWriteError):
+        return json_error(str(exc), status=exc.status)
+    if isinstance(exc, SheetsError):
+        return json_error(str(exc), status=exc.status or 400)
+    if isinstance(exc, ValueError):
+        return json_error(str(exc))
+    raise exc
 
 
 def parse_json(request: HttpRequest) -> dict:
@@ -207,10 +219,8 @@ def transactions(request: HttpRequest) -> JsonResponse:
             payments=body.get('payments'),
             giftcard_payments=body.get('giftcardPayments'),
         )
-    except ValueError as exc:
-        return json_error(str(exc))
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 400)
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 
@@ -239,10 +249,8 @@ def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
             payments=body.get('payments'),
             giftcard_payments=body.get('giftcardPayments'),
         )
-    except ValueError as exc:
-        return json_error(str(exc))
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 400)
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 
@@ -272,10 +280,8 @@ def create_transfer(request: HttpRequest) -> JsonResponse:
             to_source=body.get('toSource'),
             comment=body.get('comment') or '',
         )
-    except ValueError as exc:
-        return json_error(str(exc))
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 400)
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 
@@ -292,10 +298,8 @@ def create_receipt(request: HttpRequest) -> JsonResponse:
             sources=body.get('sources') or [],
             items=body.get('items') or [],
         )
-    except ValueError as exc:
-        return json_error(str(exc))
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 400)
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 
@@ -328,10 +332,8 @@ def buy_giftcard(request: HttpRequest) -> JsonResponse:
             balance=body.get('balance'),
             source=body.get('source'),
         )
-    except ValueError as exc:
-        return json_error(str(exc))
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 400)
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 
@@ -346,10 +348,8 @@ def use_giftcard(request: HttpRequest, giftcard_id: str) -> JsonResponse:
             comment=body.get('comment') or '',
             sub_category=body.get('subCategory') or '',
         )
-    except ValueError as exc:
-        return json_error(str(exc))
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 400)
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 
@@ -362,10 +362,8 @@ def products(request: HttpRequest) -> JsonResponse:
     try:
         body = parse_json(request)
         result = sheets_for(request).add_product(name=body.get('name'))
-    except ValueError as exc:
-        return json_error(str(exc))
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 400)
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 
@@ -385,10 +383,8 @@ def product_detail(request: HttpRequest, product_id: str) -> JsonResponse:
         try:
             body = parse_json(request)
             result = client.update_product(product_id=product_id, name=body.get('name'))
-        except ValueError as exc:
-            return json_error(str(exc))
-        except SheetsError as exc:
-            return json_error(str(exc), status=exc.status or 400)
+        except (ValueError, SheetsError, DualWriteError) as exc:
+            return json_sheets_write_error(exc)
         return JsonResponse(result)
 
     try:
@@ -431,10 +427,8 @@ def create_product_item(request: HttpRequest) -> JsonResponse:
             price=body.get('price'),
             end_date=body.get('endDate'),
         )
-    except ValueError as exc:
-        return json_error(str(exc))
-    except SheetsError as exc:
-        return json_error(str(exc), status=exc.status or 400)
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 
@@ -449,10 +443,8 @@ def product_item_detail(request: HttpRequest, product_item_id: str) -> JsonRespo
                 product_item_id=product_item_id,
                 end_date=body.get('endDate'),
             )
-        except ValueError as exc:
-            return json_error(str(exc))
-        except SheetsError as exc:
-            return json_error(str(exc), status=exc.status or 400)
+        except (ValueError, SheetsError, DualWriteError) as exc:
+            return json_sheets_write_error(exc)
         return JsonResponse(result)
 
     try:

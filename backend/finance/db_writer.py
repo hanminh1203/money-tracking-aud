@@ -27,6 +27,21 @@ from finance.models import (
 
 logger = logging.getLogger(__name__)
 
+DUAL_WRITE_USER_MESSAGE = (
+    'Saved to Google Sheets but not to the database. '
+    'Open Management and run Sync so the app matches the sheet.'
+)
+
+
+class DualWriteError(Exception):
+    """Postgres dual-write failed after a successful Sheets write."""
+
+    status = 500
+
+    def __init__(self, message: str = DUAL_WRITE_USER_MESSAGE):
+        super().__init__(message)
+
+
 RECEIPT_ITEM_NAMESPACE = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
 
 
@@ -419,8 +434,9 @@ def save_transaction_bundle(
                 giftcard_payments=giftcard_rows,
             )
             _apply_giftcard_balance_updates(owner=owner, giftcard_debits=giftcard_debits)
-    except Exception:
+    except Exception as exc:
         logger.exception('Postgres dual-write failed for transaction bundle %s', tid)
+        raise DualWriteError() from exc
 
 
 def save_transactions(
@@ -526,8 +542,9 @@ def save_receipt_bundle(
                 ]
             )
             _apply_giftcard_balance_updates(owner=owner, giftcard_debits=giftcard_debits)
-    except Exception:
+    except Exception as exc:
         logger.exception('Postgres dual-write failed for receipt bundle %s', receipt_id)
+        raise DualWriteError() from exc
 
 
 def save_giftcard_purchase(
@@ -574,8 +591,9 @@ def save_giftcard_purchase(
                 payments=[payment],
                 giftcard_payments=[],
             )
-    except Exception:
+    except Exception as exc:
         logger.exception('Postgres dual-write failed for giftcard purchase %s', giftcard_id)
+        raise DualWriteError() from exc
 
 
 def save_giftcard_use(
@@ -620,8 +638,9 @@ def save_giftcard_use(
                 payments=[],
                 giftcard_payments=[giftcard_payment],
             )
-    except Exception:
+    except Exception as exc:
         logger.exception('Postgres dual-write failed for giftcard use %s', giftcard_id)
+        raise DualWriteError() from exc
 
 
 def update_transaction_detail(
@@ -702,8 +721,9 @@ def save_product(*, user: User, product_id: Any, name: str) -> None:
             user=owner,
             name=str(name).strip(),
         )
-    except Exception:
+    except Exception as exc:
         logger.exception('Postgres dual-write failed for product %s', product_id)
+        raise DualWriteError() from exc
 
 
 def update_product(*, user: User, product_id: Any, name: str) -> None:

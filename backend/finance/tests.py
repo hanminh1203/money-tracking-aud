@@ -18,6 +18,7 @@ from finance.db_reader import (
 )
 from finance.db_sync import SyncError, compare_mirror, sync_from_sheets
 from finance.db_writer import (
+    DualWriteError,
     reconcile_receipt_items,
     save_product_item,
     update_product_item,
@@ -2192,3 +2193,353 @@ class PerthLocalCalendarTests(TestCase):
             {'sources': [], 'categories': []},
         )
         self.assertEqual(result['date'], '2026-09-19')
+
+
+class DualWriteCreateFailureTests(TestCase):
+    """Creates must not report success when Postgres dual-write fails."""
+
+    def setUp(self):
+        self.user = User.objects.create(
+            email='dualwrite@example.com',
+            sheet_id='sheet-dualwrite',
+        )
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.giftcards_cat = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Giftcards',
+            type='Expense',
+        )
+        self.giftcard = Giftcard.objects.create(
+            user=self.user,
+            row_number=3,
+            shop='Coles',
+            date=date(2026, 1, 1),
+            balance=Decimal('40.00'),
+        )
+
+    def assert_dual_write_http_error(self, response):
+        self.assertFalse(200 <= response.status_code < 300, response.content)
+        self.assertGreaterEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn('error', body)
+        self.assertIn('Sync', body['error'])
+
+    def test_save_transaction_bundle_reraises_postgres_failure(self):
+        from finance.db_writer import save_transaction_bundle
+
+        with patch.object(
+            Transaction.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            with self.assertRaises(DualWriteError) as ctx:
+                save_transaction_bundle(
+                    user=self.user,
+                    date='2026-01-15',
+                    change='-10.00',
+                    row_number=1,
+                    sub_category='Groceries',
+                    payments=[
+                        {
+                            'payment_id': str(uuid.uuid4()),
+                            'source': 'Everyday',
+                            'amount': '10.00',
+                            'row_number': 1,
+                        }
+                    ],
+                )
+        self.assertIn('Sync', str(ctx.exception))
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+    def test_save_receipt_bundle_reraises_postgres_failure(self):
+        from finance.db_writer import save_receipt_bundle
+
+        with patch.object(
+            Transaction.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            with self.assertRaises(DualWriteError) as ctx:
+                save_receipt_bundle(
+                    user=self.user,
+                    receipt_id=uuid.uuid4(),
+                    date='2026-01-15',
+                    total='8.50',
+                    items=[
+                        {
+                            'id': str(uuid.uuid4()),
+                            'name': 'Milk',
+                            'amount': 1,
+                            'unit': 'bottle',
+                            'money': '8.50',
+                        }
+                    ],
+                    transaction={
+                        'transaction_id': str(uuid.uuid4()),
+                        'date': '2026-01-15',
+                        'comment': 'Coles :',
+                        'sub_category': 'Groceries',
+                        'row_number': 2,
+                    },
+                    payments=[
+                        {
+                            'payment_id': str(uuid.uuid4()),
+                            'source': 'Everyday',
+                            'amount': '8.50',
+                            'row_number': 2,
+                        }
+                    ],
+                )
+        self.assertIn('Sync', str(ctx.exception))
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+
+    def test_save_giftcard_purchase_reraises_postgres_failure(self):
+        from finance.db_writer import save_giftcard_purchase
+
+        with patch.object(
+            Giftcard.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            with self.assertRaises(DualWriteError) as ctx:
+                save_giftcard_purchase(
+                    user=self.user,
+                    giftcard_id=uuid.uuid4(),
+                    shop='Woolworths',
+                    date='2026-01-15',
+                    balance='25.00',
+                    row_number=4,
+                    transaction={
+                        'transaction_id': str(uuid.uuid4()),
+                        'date': '2026-01-15',
+                        'change': -25.0,
+                        'comment': 'Buy giftcard: Woolworths',
+                        'sub_category': 'Giftcards',
+                        'row_number': 5,
+                    },
+                    payment={
+                        'payment_id': str(uuid.uuid4()),
+                        'source': 'Everyday',
+                        'amount': 25.0,
+                        'row_number': 6,
+                    },
+                )
+        self.assertIn('Sync', str(ctx.exception))
+        self.assertEqual(Giftcard.objects.filter(user=self.user).count(), 1)
+
+    def test_save_giftcard_use_reraises_postgres_failure(self):
+        from finance.db_writer import save_giftcard_use
+
+        with patch.object(
+            Transaction.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            with self.assertRaises(DualWriteError) as ctx:
+                save_giftcard_use(
+                    user=self.user,
+                    giftcard_id=self.giftcard.id,
+                    new_balance='30.00',
+                    date='2026-01-15',
+                    change='-10.00',
+                    comment='Use giftcard',
+                    sub_category='Groceries',
+                    row_number=7,
+                    transaction_id=uuid.uuid4(),
+                    giftcard_payment={
+                        'giftcard_payment_id': str(uuid.uuid4()),
+                        'giftcard_id': str(self.giftcard.id),
+                        'amount': '10.00',
+                        'row_number': 8,
+                    },
+                )
+        self.assertIn('Sync', str(ctx.exception))
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('40.00'))
+
+    def test_save_product_reraises_postgres_failure(self):
+        from finance.db_writer import save_product
+
+        with patch.object(
+            Product.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            with self.assertRaises(DualWriteError) as ctx:
+                save_product(
+                    user=self.user,
+                    product_id=uuid.uuid4(),
+                    name='Toothpaste',
+                )
+        self.assertIn('Sync', str(ctx.exception))
+        self.assertEqual(Product.objects.filter(user=self.user).count(), 0)
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
+    def test_create_transaction_api_postgres_failure_is_not_success(
+        self, _append_tx, append_funding, _apply, _token, get_user
+    ):
+        get_user.return_value = self.user
+        append_funding.return_value = (
+            [
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': 10.0,
+                    'row_number': 1,
+                }
+            ],
+            [],
+        )
+        with patch.object(
+            Transaction.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            response = self.client.post(
+                '/api/transactions',
+                data={
+                    'date': '2026-01-15',
+                    'amount': 10,
+                    'type': 'Expense',
+                    'source': 'Everyday',
+                    'subCategory': 'Groceries',
+                },
+                content_type='application/json',
+            )
+        self.assert_dual_write_http_error(response)
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_rows', return_value=[2])
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
+    def test_create_receipt_api_postgres_failure_is_not_success(
+        self, _append_tx, _append_rows, append_funding, _apply, _token, get_user
+    ):
+        get_user.return_value = self.user
+        append_funding.return_value = (
+            [
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': 8.5,
+                    'row_number': 1,
+                }
+            ],
+            [],
+        )
+        with patch.object(
+            Transaction.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            response = self.client.post(
+                '/api/receipts',
+                data={
+                    'date': '2026-01-15',
+                    'store': 'Coles',
+                    'subCategory': 'Groceries',
+                    'sources': [{'source': 'Everyday', 'amount': 8.5}],
+                    'items': [
+                        {
+                            'name': 'Milk',
+                            'amount': 1,
+                            'unit': 'bottle',
+                            'money': 8.5,
+                        }
+                    ],
+                },
+                content_type='application/json',
+            )
+        self.assert_dual_write_http_error(response)
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_rows', return_value=[4])
+    def test_buy_giftcard_api_postgres_failure_is_not_success(
+        self, _append_rows, append_funding, _token, get_user
+    ):
+        get_user.return_value = self.user
+        append_funding.return_value = (
+            [
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': 25.0,
+                    'row_number': 1,
+                }
+            ],
+            [],
+        )
+        before = Giftcard.objects.filter(user=self.user).count()
+        with patch.object(
+            Giftcard.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            response = self.client.post(
+                '/api/giftcards/buy',
+                data={
+                    'shop': 'Woolworths',
+                    'date': '2026-01-15',
+                    'balance': 25,
+                    'source': 'Everyday',
+                },
+                content_type='application/json',
+            )
+        self.assert_dual_write_http_error(response)
+        self.assertEqual(Giftcard.objects.filter(user=self.user).count(), before)
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    @patch.object(SheetsClient, 'update_table_cell_at_row')
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_rows', return_value=[9])
+    def test_use_giftcard_api_postgres_failure_is_not_success(
+        self, _append_rows, append_funding, _update_cell, _token, get_user
+    ):
+        get_user.return_value = self.user
+        append_funding.return_value = (
+            [],
+            [
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': str(self.giftcard.id),
+                    'amount': 10.0,
+                    'row_number': 1,
+                }
+            ],
+        )
+        with patch.object(
+            Transaction.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            response = self.client.post(
+                f'/api/giftcards/{self.giftcard.id}/use',
+                data={
+                    'amount': 10,
+                    'subCategory': 'Groceries',
+                    'comment': 'Shop',
+                },
+                content_type='application/json',
+            )
+        self.assert_dual_write_http_error(response)
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('40.00'))
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    @patch.object(SheetsClient, 'append_rows', return_value=[1])
+    def test_create_product_api_postgres_failure_is_not_success(
+        self, _append_rows, _token, get_user
+    ):
+        get_user.return_value = self.user
+        with patch.object(
+            Product.objects, 'create', side_effect=RuntimeError('postgres down')
+        ):
+            response = self.client.post(
+                '/api/products',
+                data={'name': 'Shampoo'},
+                content_type='application/json',
+            )
+        self.assert_dual_write_http_error(response)
+        self.assertEqual(Product.objects.filter(user=self.user).count(), 0)

@@ -14,6 +14,7 @@ export default function Products({ onSaved, listVersion }) {
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const [createError, setCreateError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,14 +40,15 @@ export default function Products({ onSaved, listVersion }) {
     const trimmed = name.trim();
     if (!trimmed) return;
     setSubmitting(true);
-    setError(null);
+    setCreateError(null);
     try {
       await createProduct({ name: trimmed });
       setModalOpen(false);
       setName('');
+      setCreateError(null);
       onSaved?.();
     } catch (err) {
-      setError(err.message || String(err));
+      setCreateError(err.message || String(err));
     } finally {
       setSubmitting(false);
     }
@@ -59,7 +61,14 @@ export default function Products({ onSaved, listVersion }) {
     >
       <div className="space-y-5">
         <PageActions>
-          <button type="button" onClick={() => setModalOpen(true)} className="btn-primary">
+          <button
+            type="button"
+            onClick={() => {
+              setCreateError(null);
+              setModalOpen(true);
+            }}
+            className="btn-primary"
+          >
             Add product
           </button>
         </PageActions>
@@ -155,6 +164,7 @@ export default function Products({ onSaved, listVersion }) {
                 autoFocus
               />
             </Field>
+            {createError && <p className="text-sm text-expense">{createError}</p>}
             <div className="flex justify-end gap-2">
               <button type="button" className="btn-secondary" onClick={() => setModalOpen(false)}>
                 Cancel
