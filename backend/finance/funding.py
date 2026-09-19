@@ -50,6 +50,25 @@ def aggregate_giftcard_debits(giftcard_payments: list[dict] | None) -> dict[str,
     return totals
 
 
+def net_giftcard_debits(
+    new_payments: list[dict] | None,
+    previous_payments: list[dict] | None = None,
+) -> dict[str, Decimal]:
+    """Return net additional debit (+) or credit (-) by giftcard id.
+
+    Used when editing a transaction: old giftcard payments are credited back
+    and new ones are debited, so balances move by the difference.
+    """
+    new_totals = aggregate_giftcard_debits(new_payments)
+    old_totals = aggregate_giftcard_debits(previous_payments)
+    deltas: dict[str, Decimal] = {}
+    for gid in set(new_totals) | set(old_totals):
+        delta = new_totals.get(gid, Decimal('0')) - old_totals.get(gid, Decimal('0'))
+        if delta != 0:
+            deltas[gid] = delta
+    return deltas
+
+
 def validate_giftcard_debit(balance: Any, amount: Any) -> Decimal:
     """Return new balance after debit, or raise ValueError if amount exceeds balance."""
     current = _to_decimal(balance)

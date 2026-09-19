@@ -88,6 +88,176 @@ def _receipt_item_kwargs(
     }
 
 
+def _parse_optional_uuid(value: Any) -> uuid.UUID | None:
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return uuid.UUID(text)
+    except ValueError:
+        return None
+
+
+def _receipt_item_fingerprint(name: Any, amount: Any, unit: Any, money: Any) -> tuple:
+    return (
+        str(name or '').strip(),
+        _dec(amount),
+        str(unit or '').strip(),
+        _dec(money),
+    )
+
+
+def reconcile_receipt_items(
+    existing: list[ReceiptItem],
+    incoming: list[dict],
+    *,
+    receipt_id: uuid.UUID,
+) -> tuple[list[dict], list[uuid.UUID]]:
+    """Match incoming lines to existing receipt items and keep surviving IDs.
+
+    Order: explicit id on this receipt, then exact field fingerprint, then leftover
+    pairs in order (edits that omitted ids). Surviving matches keep the existing
+    primary key so ProductItem rows are not CASCADE-deleted. Removed existing
+    rows are returned so Sheets Product_Items can be cleaned up too.
+    """
+    existing_by_id = {it.id: it for it in existing}
+    assigned: dict[int, uuid.UUID] = {}
+    used_existing: set[uuid.UUID] = set()
+
+    normalized: list[dict] = []
+    for it in incoming:
+        normalized.append(
+            {
+                'id': it.get('id'),
+                'name': str(it['name']),
+                'amount': it['amount'],
+                'unit': str(it['unit']),
+                'money': it['money'],
+            }
+        )
+
+    unmatched: list[int] = []
+    for index, it in enumerate(normalized):
+        item_id = _parse_optional_uuid(it.get('id'))
+        if item_id is not None and item_id in existing_by_id and item_id not in used_existing:
+            assigned[index] = item_id
+            used_existing.add(item_id)
+        else:
+            unmatched.append(index)
+
+    leftover_by_fp: dict[tuple, list[ReceiptItem]] = {}
+    for obj in existing:
+        if obj.id in used_existing:
+            continue
+        fingerprint = _receipt_item_fingerprint(obj.name, obj.amount, obj.unit, obj.money)
+        leftover_by_fp.setdefault(fingerprint, []).append(obj)
+
+    still_unmatched: list[int] = []
+    for index in unmatched:
+        it = normalized[index]
+        fingerprint = _receipt_item_fingerprint(it['name'], it['amount'], it['unit'], it['money'])
+        bucket = leftover_by_fp.get(fingerprint) or []
+        if not bucket:
+            still_unmatched.append(index)
+            continue
+        obj = bucket.pop(0)
+        assigned[index] = obj.id
+        used_existing.add(obj.id)
+
+    leftover_existing = [obj for obj in existing if obj.id not in used_existing]
+    paired = min(len(still_unmatched), len(leftover_existing))
+    for index, obj in zip(still_unmatched[:paired], leftover_existing[:paired]):
+        assigned[index] = obj.id
+        used_existing.add(obj.id)
+
+    resolved: list[dict] = []
+    used_ids = set(used_existing)
+    for index, it in enumerate(normalized):
+        item_id = assigned.get(index)
+        if item_id is None:
+            item_id = _parse_optional_uuid(it.get('id'))
+            if item_id is None or item_id in used_ids:
+                item_id = receipt_item_id_for_row(
+                    item_id=None,
+                    receipt_id=receipt_id,
+                    name=it['name'],
+                    amount=it['amount'],
+                    unit=it['unit'],
+                    money=it['money'],
+                )
+            if item_id in used_ids:
+                item_id = uuid.uuid4()
+            used_ids.add(item_id)
+        resolved.append(
+            {
+                'id': str(item_id),
+                'name': it['name'],
+                'amount': it['amount'],
+                'unit': it['unit'],
+                'money': it['money'],
+            }
+        )
+
+    removed_ids = [obj.id for obj in existing if obj.id not in used_existing]
+    return resolved, removed_ids
+
+
+def _sync_receipt_items(
+    *,
+    owner: User,
+    receipt: Receipt,
+    items: list[dict],
+) -> list[uuid.UUID]:
+    """Update existing receipt items in place; insert new; delete removed."""
+    existing = list(ReceiptItem.objects.filter(receipt=receipt, user=owner))
+    resolved, removed_ids = reconcile_receipt_items(
+        existing,
+        items,
+        receipt_id=receipt.id,
+    )
+    existing_by_id = {obj.id: obj for obj in existing}
+    keep_ids: set[uuid.UUID] = set()
+    to_update: list[ReceiptItem] = []
+    to_create: list[ReceiptItem] = []
+
+    for it in resolved:
+        kwargs = _receipt_item_kwargs(owner=owner, receipt_id=receipt.id, it=it)
+        item_id = kwargs['id']
+        keep_ids.add(item_id)
+        obj = existing_by_id.get(item_id)
+        if obj is None:
+            to_create.append(ReceiptItem(**kwargs))
+            continue
+        new_name = kwargs['name']
+        new_amount = kwargs['amount']
+        new_unit = kwargs['unit']
+        new_money = kwargs['money']
+        if (
+            obj.name == new_name
+            and obj.amount == new_amount
+            and obj.unit == new_unit
+            and obj.money == new_money
+        ):
+            continue
+        obj.name = new_name
+        obj.amount = new_amount
+        obj.unit = new_unit
+        obj.money = new_money
+        obj.version = (obj.version or 1) + 1
+        to_update.append(obj)
+
+    if to_create:
+        ReceiptItem.objects.bulk_create(to_create)
+    if to_update:
+        ReceiptItem.objects.bulk_update(
+            to_update, ['name', 'amount', 'unit', 'money', 'version']
+        )
+    stale_ids = [obj.id for obj in existing if obj.id not in keep_ids]
+    if stale_ids:
+        ReceiptItem.objects.filter(pk__in=stale_ids, user=owner).delete()
+    return removed_ids
+
+
 def _parse_date(value: Any) -> date:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
@@ -388,7 +558,7 @@ def save_giftcard_purchase(
     transaction: dict,
     payment: dict,
 ) -> None:
-    """Insert Giftcard + buy Transaction with one Payment."""
+    """Insert Giftcard + cash-out Transaction (asset conversion, not an expense)."""
     owner = _require_user(user)
     try:
         gid = uuid.UUID(str(giftcard_id))
@@ -483,6 +653,7 @@ def update_transaction_detail(
     sub_category: str,
     payments: list[dict],
     giftcard_payments: list[dict] | None = None,
+    giftcard_debits: list[dict] | None = None,
     receipt_total: Any | None = None,
     items: list[dict] | None = None,
 ) -> None:
@@ -517,6 +688,7 @@ def update_transaction_detail(
                 payments=payment_rows,
                 giftcard_payments=giftcard_rows,
             )
+            _apply_giftcard_balance_updates(owner=owner, giftcard_debits=giftcard_debits)
 
             try:
                 receipt = Receipt.objects.select_for_update().get(
@@ -532,19 +704,7 @@ def update_transaction_detail(
                 receipt.save(update_fields=['date', 'total', 'version'])
 
                 if items is not None:
-                    ReceiptItem.objects.filter(receipt=receipt, user=owner).delete()
-                    ReceiptItem.objects.bulk_create(
-                        [
-                            ReceiptItem(
-                                **_receipt_item_kwargs(
-                                    owner=owner,
-                                    receipt_id=receipt.id,
-                                    it=it,
-                                )
-                            )
-                            for it in items
-                        ]
-                    )
+                    _sync_receipt_items(owner=owner, receipt=receipt, items=items)
     except Exception:
         logger.exception(
             'Postgres dual-write failed for transaction update %s', transaction.id

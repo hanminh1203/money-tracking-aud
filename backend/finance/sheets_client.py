@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date as date_cls
 from typing import Any
 
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 from finance import db_writer
 
@@ -42,6 +42,8 @@ PRODUCT_ITEM_COLUMNS = [
     'End Date',
 ]
 GIFTCARD_SOURCE_NAME = 'Giftcard'
+# Cash↔cash transfers and cash→giftcard purchases (not an Expense).
+TRANSFER_SUB_CATEGORY = 'Exchange (self)'
 
 # Export column formats for Australian locale workbooks.
 EXPORT_AUD_CURRENCY = {'type': 'CURRENCY', 'pattern': '"$"#,##0.00'}
@@ -611,6 +613,127 @@ class SheetsClient:
                 rows.append(start_row + i)
         return rows
 
+    def find_matching_sheet_row_map(
+        self,
+        table_name: str,
+        *,
+        match_column: str,
+        match_value: str,
+        key_column: str,
+    ) -> dict[str, int]:
+        """Map key_column value → sheet row for rows matching match_column."""
+        table = self.get_table(table_name)
+        headers = [c['name'] for c in table['columns']]
+        match_idx = self.find_col(headers, rf'^{re.escape(match_column)}$')
+        key_idx = self.find_col(headers, rf'^{re.escape(key_column)}$')
+        if match_idx < 0:
+            raise SheetsError(f'Column "{match_column}" not found in table "{table_name}"')
+        if key_idx < 0:
+            raise SheetsError(f'Column "{key_column}" not found in table "{table_name}"')
+
+        values = self.get_values(self.data_range_a1(table))
+        start_row = table['range']['startRowIndex'] + 2
+        mapping: dict[str, int] = {}
+        for i, row in enumerate(values):
+            cell = row[match_idx] if match_idx < len(row) else None
+            if str(cell or '').strip() != str(match_value).strip():
+                continue
+            key = str(row[key_idx] if key_idx < len(row) else '').strip()
+            if key and key not in mapping:
+                mapping[key] = start_row + i
+        return mapping
+
+    def find_matching_sheet_rows_for_values(
+        self,
+        table_name: str,
+        *,
+        match_column: str,
+        match_values: list[Any] | set[Any],
+    ) -> list[int]:
+        """Return 1-based sheet rows whose column is in match_values."""
+        wanted = {str(value).strip() for value in match_values if str(value).strip()}
+        if not wanted:
+            return []
+        table = self.get_table(table_name)
+        headers = [c['name'] for c in table['columns']]
+        match_idx = self.find_col(headers, rf'^{re.escape(match_column)}$')
+        if match_idx < 0:
+            raise SheetsError(f'Column "{match_column}" not found in table "{table_name}"')
+
+        values = self.get_values(self.data_range_a1(table))
+        start_row = table['range']['startRowIndex'] + 2
+        rows: list[int] = []
+        for i, row in enumerate(values):
+            cell = row[match_idx] if match_idx < len(row) else None
+            if str(cell or '').strip() in wanted:
+                rows.append(start_row + i)
+        return rows
+
+    def _sync_receipt_item_sheet_rows(
+        self,
+        *,
+        receipt_id: str,
+        items: list[dict],
+        removed_item_ids: list[Any],
+    ) -> None:
+        """Update Receipt_Items by id and drop Product_Items for removed lines."""
+        rid = str(receipt_id)
+        row_by_id = self.find_matching_sheet_row_map(
+            settings.RECEIPT_ITEMS_TABLE,
+            match_column='Receipt ID',
+            match_value=rid,
+            key_column='Receipt Item ID',
+        )
+        to_append: list[list] = []
+        for it in items:
+            item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
+            it['id'] = item_id
+            sheet_row = row_by_id.pop(item_id, None)
+            values_by_column = {
+                'Receipt Item ID': item_id,
+                'Receipt ID': rid,
+                'Name': it['name'],
+                'Amount': it['amount'],
+                'Unit': it['unit'],
+                'Money': it['money'],
+            }
+            if sheet_row is not None:
+                self.update_table_row_at(
+                    settings.RECEIPT_ITEMS_TABLE,
+                    sheet_row=sheet_row,
+                    values_by_column=values_by_column,
+                )
+            else:
+                to_append.append(
+                    [
+                        item_id,
+                        rid,
+                        it['name'],
+                        it['amount'],
+                        it['unit'],
+                        it['money'],
+                    ]
+                )
+        if to_append:
+            self.append_rows(
+                settings.RECEIPT_ITEMS_TABLE,
+                RECEIPT_ITEM_COLUMNS,
+                to_append,
+            )
+        extra_old = list(row_by_id.values())
+        if extra_old:
+            self.delete_table_rows_at(settings.RECEIPT_ITEMS_TABLE, extra_old)
+
+        stale_ids = {str(item_id).strip() for item_id in removed_item_ids if str(item_id).strip()}
+        stale_ids.update(row_by_id.keys())
+        product_rows = self.find_matching_sheet_rows_for_values(
+            settings.PRODUCT_ITEMS_TABLE,
+            match_column='Receipt Item ID',
+            match_values=stale_ids,
+        )
+        if product_rows:
+            self.delete_table_rows_at(settings.PRODUCT_ITEMS_TABLE, product_rows)
+
     def update_table_row_at(
         self,
         table_name: str,
@@ -831,32 +954,48 @@ class SheetsClient:
             payment_rows.append({'source': pay_source, 'amount': amt})
         return payment_rows, giftcard_rows
 
-    def plan_giftcard_debits(self, giftcard_payments: list[dict] | None) -> list[dict]:
-        """Validate giftcard balances and return planned debits (no writes)."""
-        from finance.funding import aggregate_giftcard_debits, validate_giftcard_debit
+    def plan_giftcard_debits(
+        self,
+        giftcard_payments: list[dict] | None,
+        previous_payments: list[dict] | None = None,
+    ) -> list[dict]:
+        """Validate giftcard balances and return planned balance updates (no writes).
+
+        ``previous_payments`` are this transaction's existing giftcard payments
+        (already reflected in Giftcard.balance). Edits move balances by the
+        net difference so a $20 redemption edited to $10 credits $10 back.
+        """
+        from decimal import Decimal
+
+        from finance.funding import net_giftcard_debits, validate_giftcard_debit
         from finance.models import Giftcard
 
         try:
-            totals = aggregate_giftcard_debits(giftcard_payments)
+            deltas = net_giftcard_debits(giftcard_payments, previous_payments)
         except ValueError as exc:
             raise SheetsError(str(exc)) from exc
-        if not totals:
+        if not deltas:
             return []
 
         planned: list[dict] = []
-        for gid, amount in totals.items():
+        for gid, delta in deltas.items():
             try:
                 card = Giftcard.objects.get(pk=gid, user=self.user)
             except (Giftcard.DoesNotExist, ValueError) as exc:
                 raise SheetsError(f'Giftcard not found: {gid}', status=404) from exc
             try:
-                new_balance = validate_giftcard_debit(card.balance, amount)
+                if delta > 0:
+                    new_balance = validate_giftcard_debit(card.balance, delta)
+                else:
+                    new_balance = (Decimal(str(card.balance)) - delta).quantize(
+                        Decimal('0.01')
+                    )
             except ValueError as exc:
                 raise SheetsError(str(exc)) from exc
             planned.append(
                 {
                     'giftcard_id': gid,
-                    'amount': float(amount),
+                    'amount': float(delta),
                     'new_balance': float(new_balance),
                     'row_number': card.row_number,
                 }
@@ -954,10 +1093,10 @@ class SheetsClient:
         from_tx_id = str(uuid.uuid4())
         to_tx_id = str(uuid.uuid4())
         from_row = self.append_transaction_row(
-            [from_tx_id, date, -abs_amt, note, 'Exchange (self)']
+            [from_tx_id, date, -abs_amt, note, TRANSFER_SUB_CATEGORY]
         )
         to_row = self.append_transaction_row(
-            [to_tx_id, date, abs_amt, note, 'Exchange (self)']
+            [to_tx_id, date, abs_amt, note, TRANSFER_SUB_CATEGORY]
         )
         from_payments, _ = self.append_funding_rows(
             transaction_id=from_tx_id,
@@ -976,7 +1115,7 @@ class SheetsClient:
                     'date': date,
                     'change': -abs_amt,
                     'comment': note,
-                    'sub_category': 'Exchange (self)',
+                    'sub_category': TRANSFER_SUB_CATEGORY,
                     'row_number': from_row,
                     'payments': from_payments,
                 },
@@ -985,7 +1124,7 @@ class SheetsClient:
                     'date': date,
                     'change': abs_amt,
                     'comment': note,
-                    'sub_category': 'Exchange (self)',
+                    'sub_category': TRANSFER_SUB_CATEGORY,
                     'row_number': to_row,
                     'payments': to_payments,
                 },
@@ -1202,16 +1341,16 @@ class SheetsClient:
                     raise SheetsError(f'Item {i + 1}: unit is required')
                 if not money:
                     raise SheetsError(f'Item {i + 1}: invalid money')
-                item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
-                normalized_items.append(
-                    {
-                        'id': item_id,
-                        'name': name,
-                        'amount': item_amount,
-                        'unit': unit,
-                        'money': money,
-                    }
-                )
+                item_payload = {
+                    'name': name,
+                    'amount': item_amount,
+                    'unit': unit,
+                    'money': money,
+                }
+                item_id = str(it.get('id') or '').strip()
+                if item_id:
+                    item_payload['id'] = item_id
+                normalized_items.append(item_payload)
             if not normalized_items:
                 raise SheetsError('At least one item is required')
             total = round(sum(it['money'] for it in normalized_items) * 100) / 100
@@ -1220,18 +1359,20 @@ class SheetsClient:
         elif items:
             raise SheetsError('This transaction is not linked to a receipt')
 
-        if payments is None and giftcard_payments is None:
+        previous_giftcard_rows = [
+            {
+                'giftcard_id': str(gp.giftcard_id),
+                'amount': abs(float(gp.amount)),
+            }
+            for gp in tx.giftcard_payments.all()
+        ]
+        funding_unchanged = payments is None and giftcard_payments is None
+        if funding_unchanged:
             payment_rows = [
                 {'source': p.source.name, 'amount': abs(float(p.amount))}
                 for p in tx.payments.all()
             ]
-            giftcard_rows = [
-                {
-                    'giftcard_id': str(gp.giftcard_id),
-                    'amount': abs(float(gp.amount)),
-                }
-                for gp in tx.giftcard_payments.all()
-            ]
+            giftcard_rows = list(previous_giftcard_rows)
             if not payment_rows and not giftcard_rows and source:
                 payment_rows = [{'source': source, 'amount': abs_amt}]
         else:
@@ -1257,6 +1398,15 @@ class SheetsClient:
                 raise SheetsError(
                     f'Payment amounts ({funding_total}) must equal items total ({total})'
                 )
+
+        giftcard_debits = (
+            []
+            if funding_unchanged
+            else self.plan_giftcard_debits(
+                giftcard_rows,
+                previous_payments=previous_giftcard_rows,
+            )
+        )
 
         self.update_table_row_at(
             settings.TRANSACTIONS_TABLE,
@@ -1294,49 +1444,23 @@ class SheetsClient:
                 },
             )
 
-            item_rows = self.find_matching_sheet_rows(
-                settings.RECEIPT_ITEMS_TABLE,
-                match_column='Receipt ID',
-                match_value=str(linked_receipt.id),
+            from finance.models import ReceiptItem
+
+            existing_items = list(
+                ReceiptItem.objects.filter(receipt=linked_receipt, user=self.user)
             )
-            rid = str(linked_receipt.id)
-            overlapping = min(len(item_rows), len(normalized_items or []))
-            for i in range(overlapping):
-                it = normalized_items[i]
-                item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
-                it['id'] = item_id
-                self.update_table_row_at(
-                    settings.RECEIPT_ITEMS_TABLE,
-                    sheet_row=item_rows[i],
-                    values_by_column={
-                        'Receipt Item ID': item_id,
-                        'Receipt ID': rid,
-                        'Name': it['name'],
-                        'Amount': it['amount'],
-                        'Unit': it['unit'],
-                        'Money': it['money'],
-                    },
-                )
-            extra_new = (normalized_items or [])[overlapping:]
-            if extra_new:
-                self.append_rows(
-                    settings.RECEIPT_ITEMS_TABLE,
-                    RECEIPT_ITEM_COLUMNS,
-                    [
-                        [
-                            str(it.get('id') or uuid.uuid4()),
-                            rid,
-                            it['name'],
-                            it['amount'],
-                            it['unit'],
-                            it['money'],
-                        ]
-                        for it in extra_new
-                    ],
-                )
-            extra_old = item_rows[overlapping:]
-            if extra_old:
-                self.delete_table_rows_at(settings.RECEIPT_ITEMS_TABLE, extra_old)
+            normalized_items, removed_item_ids = db_writer.reconcile_receipt_items(
+                existing_items,
+                normalized_items or [],
+                receipt_id=linked_receipt.id,
+            )
+            self._sync_receipt_item_sheet_rows(
+                receipt_id=str(linked_receipt.id),
+                items=normalized_items,
+                removed_item_ids=removed_item_ids,
+            )
+
+        self.apply_giftcard_debits(giftcard_debits)
 
         db_writer.update_transaction_detail(
             user=self.user,
@@ -1347,6 +1471,7 @@ class SheetsClient:
             sub_category=category,
             payments=saved_payments,
             giftcard_payments=saved_giftcard_payments,
+            giftcard_debits=giftcard_debits,
             receipt_total=total,
             items=normalized_items,
         )
@@ -1384,7 +1509,8 @@ class SheetsClient:
 
         giftcard_id = str(uuid.uuid4())
         note = f'Buy giftcard: {shop_name}'
-        sub_category = 'Giftcards'
+        # Asset conversion, not consumption — same category as cash transfers.
+        sub_category = TRANSFER_SUB_CATEGORY
 
         gc_row_numbers = self.append_rows(
             settings.GIFTCARD_TABLE,
@@ -1464,7 +1590,7 @@ class SheetsClient:
 
         new_balance = round((current - abs_amt) * 100) / 100
         note = (comment or '').strip() or f'Use giftcard: {card.shop}'
-        date = date_cls.today().isoformat()
+        date = timezone.localdate().isoformat()
 
         transaction_id = str(uuid.uuid4())
         tx_row_numbers = self.append_rows(

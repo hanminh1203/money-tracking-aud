@@ -1,9 +1,11 @@
-from datetime import date
+from datetime import date, datetime, timezone as dt_timezone
 from decimal import Decimal
 import uuid
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.conf import settings
+from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 
 from finance.db_reader import (
     ReaderError,
@@ -15,10 +17,17 @@ from finance.db_reader import (
     get_transaction,
 )
 from finance.db_sync import SyncError, compare_mirror, sync_from_sheets
-from finance.db_writer import DualWriteError, save_product_item, update_product_item
+from finance.db_writer import (
+    DualWriteError,
+    reconcile_receipt_items,
+    save_product_item,
+    update_product_item,
+    update_transaction_detail,
+)
 from finance.models import (
     Category,
     Giftcard,
+    GiftcardPayment,
     Payment,
     Product,
     ProductItem,
@@ -189,6 +198,178 @@ class DashboardDataTests(TestCase):
         self.assertEqual(data['incomeBreakdown'], [])
         self.assertEqual(data['expenseBreakdown'], [])
         self.assertEqual(data['transactions'], [])
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    def test_giftcard_buy_then_use_counts_net_worth_and_spend_once(self, _localdate):
+        exchange = Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        self.add_transaction(1, date(2026, 1, 2), '100.00', self.salary)
+
+        buy = Transaction.objects.create(
+            user=self.user,
+            row_number=2,
+            date=date(2026, 1, 5),
+            change=Decimal('-20.00'),
+            category=exchange,
+            comment='Buy giftcard: Coles',
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=buy,
+            source=self.source,
+            amount=Decimal('20.00'),
+            row_number=2,
+        )
+        card = Giftcard.objects.create(
+            user=self.user,
+            row_number=1,
+            shop='Coles',
+            date=date(2026, 1, 5),
+            balance=Decimal('20.00'),
+        )
+
+        after_buy = get_dashboard_data(user=self.user)
+        self.assertEqual(after_buy['summary']['netWorth'], 100.0)
+        self.assertEqual(after_buy['summary']['income'], 100.0)
+        self.assertEqual(after_buy['summary']['expense'], 0.0)
+        self.assertEqual(after_buy['summary']['saving'], 100.0)
+        self.assertEqual(
+            [row['subCategory'] for row in after_buy['expenseBreakdown']],
+            [],
+        )
+
+        use = Transaction.objects.create(
+            user=self.user,
+            row_number=3,
+            date=date(2026, 1, 10),
+            change=Decimal('-20.00'),
+            category=self.groceries,
+            comment='Use giftcard: Coles',
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=use,
+            giftcard=card,
+            amount=Decimal('20.00'),
+            row_number=1,
+        )
+        card.balance = Decimal('0.00')
+        card.save(update_fields=['balance'])
+
+        after_use = get_dashboard_data(user=self.user)
+        self.assertEqual(after_use['summary']['netWorth'], 80.0)
+        self.assertEqual(after_use['summary']['income'], 100.0)
+        self.assertEqual(after_use['summary']['expense'], -20.0)
+        self.assertEqual(after_use['summary']['saving'], 80.0)
+        self.assertEqual(
+            after_use['expenseBreakdown'],
+            [
+                {
+                    'subCategory': 'Groceries',
+                    'amounts': {
+                        '2025/11': 0.0,
+                        '2025/12': 0.0,
+                        '2026/01': -20.0,
+                    },
+                }
+            ],
+        )
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    def test_mixed_cash_and_giftcard_spend_counts_once(self, _localdate):
+        exchange = Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        self.add_transaction(1, date(2026, 1, 2), '100.00', self.salary)
+        buy = Transaction.objects.create(
+            user=self.user,
+            row_number=2,
+            date=date(2026, 1, 5),
+            change=Decimal('-20.00'),
+            category=exchange,
+            comment='Buy giftcard: Coles',
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=buy,
+            source=self.source,
+            amount=Decimal('20.00'),
+            row_number=2,
+        )
+        card = Giftcard.objects.create(
+            user=self.user,
+            row_number=1,
+            shop='Coles',
+            date=date(2026, 1, 5),
+            balance=Decimal('20.00'),
+        )
+
+        spend = Transaction.objects.create(
+            user=self.user,
+            row_number=3,
+            date=date(2026, 1, 12),
+            change=Decimal('-50.00'),
+            category=self.groceries,
+            comment='Weekly shop',
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=spend,
+            source=self.source,
+            amount=Decimal('30.00'),
+            row_number=3,
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=spend,
+            giftcard=card,
+            amount=Decimal('20.00'),
+            row_number=2,
+        )
+        card.balance = Decimal('0.00')
+        card.save(update_fields=['balance'])
+
+        data = get_dashboard_data(user=self.user)
+        self.assertEqual(data['summary']['netWorth'], 50.0)
+        self.assertEqual(data['summary']['expense'], -50.0)
+
+    def test_source_history_excludes_giftcard_only_shop_name(self):
+        from finance.db_reader import get_transaction_data
+
+        self.add_transaction(1, date(2026, 1, 2), '40.00', self.salary)
+        card = Giftcard.objects.create(
+            user=self.user,
+            row_number=1,
+            shop='Everyday',
+            date=date(2026, 1, 3),
+            balance=Decimal('0.00'),
+        )
+        use = Transaction.objects.create(
+            user=self.user,
+            row_number=2,
+            date=date(2026, 1, 4),
+            change=Decimal('-15.00'),
+            category=self.groceries,
+            comment='Use giftcard: Everyday',
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=use,
+            giftcard=card,
+            amount=Decimal('15.00'),
+            row_number=1,
+        )
+
+        data = get_transaction_data(user=self.user, source='Everyday')
+        self.assertEqual(len(data['rows']), 1)
+        self.assertEqual(data['rows'][0]['Change'], 40.0)
 
 
 class DashboardApiTests(TestCase):
@@ -784,6 +965,302 @@ class TransactionDetailTests(TestCase):
         self.assertEqual(items[0].name, 'Eggs')
         self.assertEqual(items[0].money, Decimal('10'))
 
+    def _receipt_tx_with_items(self, item_specs):
+        tx = self.add_transaction()
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=tx,
+            date=date(2026, 1, 8),
+            total=sum((spec['money'] for spec in item_specs), Decimal('0')),
+        )
+        items = [
+            ReceiptItem.objects.create(
+                user=self.user,
+                receipt=receipt,
+                name=spec['name'],
+                amount=spec['amount'],
+                unit=spec['unit'],
+                money=spec['money'],
+            )
+            for spec in item_specs
+        ]
+        return tx, receipt, items
+
+    def test_update_preserves_product_link_when_item_fields_change(self):
+        tx, _receipt, (milk,) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('2'),
+                    'unit': 'L',
+                    'money': Decimal('4.50'),
+                }
+            ]
+        )
+        product = Product.objects.create(user=self.user, name='Milk')
+        product_item = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=milk,
+            end_date=date(2026, 3, 1),
+        )
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-09',
+            change='-6.00',
+            comment='Coles : restock',
+            sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '6.00', 'row_number': 1}],
+            receipt_total='6.00',
+            items=[
+                {
+                    'id': str(milk.id),
+                    'name': 'Organic Milk',
+                    'amount': 3,
+                    'unit': 'L',
+                    'money': 6,
+                }
+            ],
+        )
+
+        milk.refresh_from_db()
+        product_item.refresh_from_db()
+        self.assertEqual(milk.name, 'Organic Milk')
+        self.assertEqual(milk.amount, Decimal('3'))
+        self.assertEqual(milk.money, Decimal('6'))
+        self.assertEqual(product_item.receipt_item_id, milk.id)
+        self.assertEqual(ProductItem.objects.filter(pk=product_item.id).count(), 1)
+        data = get_transaction(user=self.user, transaction_id=str(tx.id))
+        self.assertEqual(data['receipt']['items'][0]['id'], str(milk.id))
+        self.assertEqual(data['receipt']['items'][0]['productId'], str(product.id))
+
+    def test_update_preserves_product_link_when_unrelated_item_added(self):
+        tx, receipt, (milk,) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('2'),
+                    'unit': 'L',
+                    'money': Decimal('4.50'),
+                }
+            ]
+        )
+        product = Product.objects.create(user=self.user, name='Milk')
+        product_item = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=milk,
+        )
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-08',
+            change='-10.00',
+            comment='Woolworths : weekly shop',
+            sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '10.00', 'row_number': 1}],
+            receipt_total='10.00',
+            items=[
+                {
+                    'id': str(milk.id),
+                    'name': 'Milk',
+                    'amount': 2,
+                    'unit': 'L',
+                    'money': 4.5,
+                },
+                {'name': 'Eggs', 'amount': 12, 'unit': 'piece', 'money': 5.5},
+            ],
+        )
+
+        product_item.refresh_from_db()
+        items = list(ReceiptItem.objects.filter(receipt=receipt).order_by('name'))
+        self.assertEqual({it.name for it in items}, {'Eggs', 'Milk'})
+        self.assertEqual(product_item.receipt_item_id, milk.id)
+        self.assertTrue(ReceiptItem.objects.filter(pk=milk.id).exists())
+        eggs = next(it for it in items if it.name == 'Eggs')
+        self.assertNotEqual(eggs.id, milk.id)
+        self.assertEqual(eggs.product_items.count(), 0)
+
+    def test_update_preserves_product_link_when_id_omitted_and_fields_change(self):
+        tx, _receipt, (milk,) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('2'),
+                    'unit': 'L',
+                    'money': Decimal('4.50'),
+                }
+            ]
+        )
+        product = Product.objects.create(user=self.user, name='Milk')
+        product_item = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=milk,
+        )
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-08',
+            change='-6.00',
+            comment='Woolworths : weekly shop',
+            sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '6.00', 'row_number': 1}],
+            receipt_total='6.00',
+            items=[{'name': 'Organic Milk', 'amount': 3, 'unit': 'L', 'money': 6}],
+        )
+
+        milk.refresh_from_db()
+        product_item.refresh_from_db()
+        self.assertEqual(milk.name, 'Organic Milk')
+        self.assertEqual(product_item.receipt_item_id, milk.id)
+
+    def test_update_drops_product_link_when_linked_item_removed(self):
+        """Removing a linked line deletes that ReceiptItem and CASCADE ProductItems.
+
+        Surviving lines keep their ids and product attachments. Sheets Product_Items
+        rows for the removed receipt item id are deleted in update_transaction so
+        Sync is not left pointing at a missing Receipt_Items row.
+        """
+        tx, receipt, (milk, bread) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('2'),
+                    'unit': 'L',
+                    'money': Decimal('4.50'),
+                },
+                {
+                    'name': 'Bread',
+                    'amount': Decimal('1'),
+                    'unit': 'loaf',
+                    'money': Decimal('8.00'),
+                },
+            ]
+        )
+        product = Product.objects.create(user=self.user, name='Milk')
+        product_item = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=milk,
+        )
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-08',
+            change='-8.00',
+            comment='Woolworths : weekly shop',
+            sub_category='Groceries',
+            payments=[{'source': 'Everyday', 'amount': '8.00', 'row_number': 1}],
+            receipt_total='8.00',
+            items=[
+                {
+                    'id': str(bread.id),
+                    'name': 'Bread',
+                    'amount': 1,
+                    'unit': 'loaf',
+                    'money': 8,
+                }
+            ],
+        )
+
+        self.assertFalse(ReceiptItem.objects.filter(pk=milk.id).exists())
+        self.assertFalse(ProductItem.objects.filter(pk=product_item.id).exists())
+        self.assertTrue(ReceiptItem.objects.filter(pk=bread.id, receipt=receipt).exists())
+        self.assertEqual(receipt.items.count(), 1)
+
+    def test_reconcile_receipt_items_keeps_id_when_order_changes(self):
+        _tx, receipt, (milk, bread) = self._receipt_tx_with_items(
+            [
+                {
+                    'name': 'Milk',
+                    'amount': Decimal('1'),
+                    'unit': 'L',
+                    'money': Decimal('4.00'),
+                },
+                {
+                    'name': 'Bread',
+                    'amount': Decimal('1'),
+                    'unit': 'loaf',
+                    'money': Decimal('3.00'),
+                },
+            ]
+        )
+        resolved, removed = reconcile_receipt_items(
+            list(receipt.items.all()),
+            [
+                {'id': str(bread.id), 'name': 'Bread', 'amount': 1, 'unit': 'loaf', 'money': 3},
+                {'id': str(milk.id), 'name': 'Milk', 'amount': 2, 'unit': 'L', 'money': 5},
+            ],
+            receipt_id=receipt.id,
+        )
+        self.assertEqual([row['id'] for row in resolved], [str(bread.id), str(milk.id)])
+        self.assertEqual(removed, [])
+        self.assertEqual(resolved[1]['amount'], 2)
+
+    @patch.object(SheetsClient, 'find_matching_sheet_rows_for_values', return_value=[40])
+    @patch.object(SheetsClient, 'find_matching_sheet_row_map')
+    @patch.object(SheetsClient, 'append_rows')
+    @patch.object(SheetsClient, 'delete_table_rows_at')
+    @patch.object(SheetsClient, 'update_table_row_at')
+    def test_sheet_receipt_items_update_by_id_and_drop_removed_product_rows(
+        self,
+        update_row,
+        delete_rows,
+        append_rows,
+        row_map,
+        product_rows,
+    ):
+        milk_id = str(uuid.uuid4())
+        bread_id = str(uuid.uuid4())
+        eggs_id = str(uuid.uuid4())
+        row_map.return_value = {milk_id: 10, bread_id: 11}
+        client = SheetsClient('token', 'sheet-id', user=self.user)
+
+        client._sync_receipt_item_sheet_rows(
+            receipt_id='receipt-1',
+            items=[
+                {
+                    'id': bread_id,
+                    'name': 'Bread',
+                    'amount': 1,
+                    'unit': 'loaf',
+                    'money': 4,
+                },
+                {
+                    'id': eggs_id,
+                    'name': 'Eggs',
+                    'amount': 12,
+                    'unit': 'piece',
+                    'money': 6,
+                },
+            ],
+            removed_item_ids=[milk_id],
+        )
+
+        updated_ids = [
+            call.kwargs['values_by_column']['Receipt Item ID']
+            for call in update_row.call_args_list
+        ]
+        self.assertEqual(updated_ids, [bread_id])
+        self.assertEqual(update_row.call_args.kwargs['sheet_row'], 11)
+        append_rows.assert_called_once()
+        appended = append_rows.call_args.args[2]
+        self.assertEqual(appended[0][0], eggs_id)
+        deleted_row_groups = [call.args[1] for call in delete_rows.call_args_list]
+        self.assertIn([10], deleted_row_groups)
+        self.assertIn([40], deleted_row_groups)
+        product_rows.assert_called_once()
+        self.assertEqual(
+            set(product_rows.call_args.kwargs['match_values']),
+            {milk_id},
+        )
+
     @patch('finance.api_views.sheets_for')
     @patch('finance.api_views.oauth.get_finance_user')
     @patch('finance.api_views.oauth.get_access_token', return_value='token')
@@ -1253,6 +1730,19 @@ class FundingTests(TestCase):
             validate_giftcard_debit('10.00', '10.50')
         self.assertIn('exceeds giftcard balance', str(ctx.exception))
 
+    def test_net_giftcard_debits_credits_and_debits_difference(self):
+        from finance.funding import net_giftcard_debits
+
+        deltas = net_giftcard_debits(
+            [{'giftcard_id': 'aaa', 'amount': '10'}],
+            previous_payments=[
+                {'giftcard_id': 'aaa', 'amount': '20'},
+                {'giftcard_id': 'bbb', 'amount': '5'},
+            ],
+        )
+        self.assertEqual(deltas['aaa'], Decimal('-10'))
+        self.assertEqual(deltas['bbb'], Decimal('-5'))
+
 
 class GiftcardDebitWriteTests(TestCase):
     def setUp(self):
@@ -1376,6 +1866,333 @@ class GiftcardDebitWriteTests(TestCase):
         )
         self.giftcard.refresh_from_db()
         self.assertEqual(self.giftcard.balance, Decimal('20.00'))
+
+    def test_plan_giftcard_debits_credits_previous_payment_on_edit(self):
+        # $40 card already reduced by this transaction's $20 giftcard payment.
+        self.giftcard.balance = Decimal('20.00')
+        self.giftcard.save(update_fields=['balance'])
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        gid = str(self.giftcard.id)
+        planned = client.plan_giftcard_debits(
+            [{'giftcard_id': gid, 'amount': '10'}],
+            previous_payments=[{'giftcard_id': gid, 'amount': '20'}],
+        )
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0]['amount'], -10.0)
+        self.assertEqual(planned[0]['new_balance'], 30.0)
+
+    def test_plan_giftcard_debits_edit_overspend_uses_remaining_balance(self):
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        gid = str(self.giftcard.id)
+        with self.assertRaises(SheetsError) as ctx:
+            client.plan_giftcard_debits(
+                [{'giftcard_id': gid, 'amount': '50'}],
+                previous_payments=[{'giftcard_id': gid, 'amount': '5'}],
+            )
+        self.assertIn('exceeds giftcard balance', str(ctx.exception))
+
+    def test_update_transaction_detail_moves_giftcard_balance(self):
+        from finance.db_writer import update_transaction_detail
+
+        gid = str(self.giftcard.id)
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=8,
+            date=date(2026, 1, 10),
+            change=Decimal('-20.00'),
+            category=self.groceries,
+            comment='Use giftcard: Coles',
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=tx,
+            giftcard=self.giftcard,
+            amount=Decimal('20.00'),
+            row_number=8,
+        )
+        self.giftcard.balance = Decimal('20.00')
+        self.giftcard.save(update_fields=['balance'])
+
+        update_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            date='2026-01-10',
+            change='-10.00',
+            comment='Use giftcard: Coles',
+            sub_category='Groceries',
+            payments=[],
+            giftcard_payments=[
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': gid,
+                    'amount': '10.00',
+                    'row_number': 9,
+                }
+            ],
+            giftcard_debits=[{'giftcard_id': gid, 'new_balance': '30.00'}],
+        )
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('30.00'))
+        self.assertEqual(tx.giftcard_payments.get().amount, Decimal('10.00'))
+
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_rows')
+    def test_buy_giftcard_records_transfer_not_expense(
+        self, append_rows, append_funding
+    ):
+        Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        append_rows.side_effect = [[4], [5]]
+        append_funding.return_value = (
+            [
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': 20.0,
+                    'row_number': 6,
+                }
+            ],
+            [],
+        )
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        result = client.buy_giftcard(
+            shop='Coles',
+            date='2026-01-05',
+            balance=20,
+            source='Everyday',
+        )
+        self.assertEqual(result['balance'], 20)
+        tx_values = append_rows.call_args_list[1].args[2][0]
+        self.assertEqual(tx_values[2], -20)
+        self.assertEqual(tx_values[4], 'Exchange (self)')
+        tx = Transaction.objects.get(user=self.user, comment='Buy giftcard: Coles')
+        self.assertEqual(tx.change, Decimal('-20.00'))
+        self.assertEqual(tx.category.sub_category, 'Exchange (self)')
+        self.assertEqual(tx.category.type, '')
+        card = Giftcard.objects.get(pk=result['giftcardId'])
+        self.assertEqual(card.balance, Decimal('20.00'))
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    def test_save_giftcard_purchase_and_use_single_count_dashboard(self, _localdate):
+        from finance import db_writer
+
+        self.giftcard.balance = Decimal('0.00')
+        self.giftcard.save(update_fields=['balance'])
+
+        Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        salary = Category.objects.create(
+            user=self.user,
+            main_category='Earnings',
+            sub_category='Salary',
+            type='Income',
+        )
+        income_tx = Transaction.objects.create(
+            user=self.user,
+            row_number=10,
+            date=date(2026, 1, 2),
+            change=Decimal('100.00'),
+            category=salary,
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=income_tx,
+            source=self.source,
+            amount=Decimal('100.00'),
+            row_number=10,
+        )
+        giftcard_id = str(uuid.uuid4())
+        buy_tx_id = str(uuid.uuid4())
+        db_writer.save_giftcard_purchase(
+            user=self.user,
+            giftcard_id=giftcard_id,
+            shop='Coles',
+            date='2026-01-05',
+            balance='20.00',
+            row_number=11,
+            transaction={
+                'transaction_id': buy_tx_id,
+                'date': '2026-01-05',
+                'change': '-20.00',
+                'comment': 'Buy giftcard: Coles',
+                'sub_category': 'Exchange (self)',
+                'row_number': 12,
+            },
+            payment={
+                'payment_id': str(uuid.uuid4()),
+                'source': 'Everyday',
+                'amount': '20.00',
+                'row_number': 13,
+            },
+        )
+        after_buy = get_dashboard_data(user=self.user)
+        self.assertEqual(after_buy['summary']['netWorth'], 100.0)
+        self.assertEqual(after_buy['summary']['expense'], 0.0)
+
+        db_writer.save_giftcard_use(
+            user=self.user,
+            giftcard_id=giftcard_id,
+            new_balance='0.00',
+            date='2026-01-10',
+            change='-20.00',
+            comment='Use giftcard: Coles',
+            sub_category='Groceries',
+            row_number=14,
+            transaction_id=str(uuid.uuid4()),
+            giftcard_payment={
+                'giftcard_payment_id': str(uuid.uuid4()),
+                'giftcard_id': giftcard_id,
+                'amount': '20.00',
+                'row_number': 15,
+            },
+        )
+        after_use = get_dashboard_data(user=self.user)
+        self.assertEqual(after_use['summary']['netWorth'], 80.0)
+        self.assertEqual(after_use['summary']['expense'], -20.0)
+        self.assertEqual(Giftcard.objects.get(pk=giftcard_id).balance, Decimal('0.00'))
+
+    @override_settings(TIME_ZONE='Australia/Perth')
+    @patch(
+        'django.utils.timezone.now',
+        return_value=datetime(2026, 9, 18, 20, 0, tzinfo=dt_timezone.utc),
+    )
+    @patch.object(SheetsClient, 'update_table_cell_at_row')
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_rows', return_value=[8])
+    def test_use_giftcard_date_uses_perth_calendar(
+        self, append_rows, append_funding, _update, _now
+    ):
+        from finance import db_writer
+
+        gid = str(self.giftcard.id)
+        append_funding.return_value = (
+            [],
+            [
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': gid,
+                    'amount': 10.0,
+                    'row_number': 1,
+                }
+            ],
+        )
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        with patch.object(db_writer, 'save_giftcard_use') as save_use:
+            client.use_giftcard(
+                giftcard_id=gid,
+                amount=10,
+                comment='Milk',
+                sub_category='Groceries',
+            )
+
+        self.assertEqual(append_rows.call_args.args[2][0][1], '2026-09-19')
+        self.assertEqual(save_use.call_args.kwargs['date'], '2026-09-19')
+
+
+PERTH_AFTER_UTC_MIDNIGHT = datetime(2026, 9, 18, 20, 0, tzinfo=dt_timezone.utc)
+PERTH_MONTH_BOUNDARY = datetime(2026, 9, 30, 20, 0, tzinfo=dt_timezone.utc)
+
+
+class TimeZoneSettingsTests(SimpleTestCase):
+    def test_default_time_zone_is_australia_perth(self):
+        self.assertEqual(settings.TIME_ZONE, 'Australia/Perth')
+
+
+@override_settings(TIME_ZONE='Australia/Perth')
+class PerthLocalCalendarTests(TestCase):
+    """UTC calendar date can differ from Australia/Perth (UTC+8, no DST)."""
+
+    def setUp(self):
+        self.user = User.objects.create(email='perth@example.com')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.salary = Category.objects.create(
+            user=self.user,
+            main_category='Earnings',
+            sub_category='Salary',
+            type='Income',
+        )
+
+    def add_transaction(self, row, value, amount, category=None):
+        signed = Decimal(amount)
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=value,
+            change=signed,
+            category=category,
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=self.source,
+            amount=abs(signed),
+            row_number=row,
+        )
+        return tx
+
+    def test_localdate_is_next_day_while_utc_is_still_previous_evening(self):
+        # 2026-09-18 20:00 UTC = 2026-09-19 04:00 in Perth.
+        self.assertEqual(PERTH_AFTER_UTC_MIDNIGHT.date(), date(2026, 9, 18))
+        with patch('django.utils.timezone.now', return_value=PERTH_AFTER_UTC_MIDNIGHT):
+            self.assertEqual(timezone.localdate(), date(2026, 9, 19))
+
+    def test_utc_time_zone_keeps_previous_calendar_day(self):
+        with override_settings(TIME_ZONE='UTC'):
+            with patch('django.utils.timezone.now', return_value=PERTH_AFTER_UTC_MIDNIGHT):
+                self.assertEqual(timezone.localdate(), date(2026, 9, 18))
+
+    def test_dashboard_this_month_uses_perth_month_boundary(self):
+        # 2026-09-30 20:00 UTC = 2026-10-01 04:00 Perth → current month is October.
+        self.add_transaction(1, date(2026, 9, 30), '100.00', self.salary)
+        self.add_transaction(2, date(2026, 10, 1), '200.00', self.salary)
+
+        with patch('django.utils.timezone.now', return_value=PERTH_MONTH_BOUNDARY):
+            data = get_dashboard_data(user=self.user)
+
+        self.assertEqual(data['months'], ['2026/08', '2026/09', '2026/10'])
+        self.assertEqual(data['summary']['income'], 200.0)
+        self.assertEqual(
+            [transaction['date'] for transaction in data['transactions']],
+            ['2026-10-01'],
+        )
+
+    @patch(
+        'django.utils.timezone.now',
+        return_value=PERTH_AFTER_UTC_MIDNIGHT,
+    )
+    @patch('finance.groq_client._chat', return_value={'action': 'unknown', 'reason': 'x'})
+    def test_chat_today_prompt_uses_perth_date(self, chat, _now):
+        from finance.groq_client import parse_finance_message
+
+        parse_finance_message('hello', {'sources': [], 'categories': []})
+        system = chat.call_args.args[0][0]['content']
+        self.assertIn("Today's date is 2026-09-19", system)
+        self.assertNotIn("Today's date is 2026-09-18", system)
+
+    @patch(
+        'django.utils.timezone.now',
+        return_value=PERTH_AFTER_UTC_MIDNIGHT,
+    )
+    @patch(
+        'finance.groq_client._chat',
+        return_value={'store': 'X', 'date': 'blurry', 'items': []},
+    )
+    def test_receipt_fallback_date_uses_perth_date(self, _chat, _now):
+        from finance.groq_client import extract_receipt_from_image
+
+        result = extract_receipt_from_image(
+            'data:image/png;base64,xx',
+            {'sources': [], 'categories': []},
+        )
+        self.assertEqual(result['date'], '2026-09-19')
 
 
 class DualWriteCreateFailureTests(TestCase):
