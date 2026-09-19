@@ -87,7 +87,12 @@ export function normalizeRows(rows, categories = [], { sort = true } = {}) {
   return mapped.sort((a, b) => (a.date - b.date) || ((a.creationDate || 0) - (b.creationDate || 0)));
 }
 
-/** Running balance per source, keyed by source name -> current balance. */
+/** Running balance per cash/bank source, keyed by source name -> current balance.
+
+ * Giftcard-funded amounts are not source balances; they live on Giftcard.balance.
+ * Mixed payments only apply the Payment rows. Giftcard-only rows are skipped
+ * so shop names do not appear as fake sources.
+ */
 export function currentBalances(transactions) {
   const balances = {};
   for (const t of transactions) {
@@ -99,6 +104,9 @@ export function currentBalances(transactions) {
           balances[p.source] = (balances[p.source] || 0) + sign * amt;
         }
       }
+      continue;
+    }
+    if (t.giftcardPayments?.length) {
       continue;
     }
     if (t.source) {

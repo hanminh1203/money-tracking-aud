@@ -35,7 +35,7 @@ export default function BuyGiftcardForm({ metadata, balances, onSaved, onClose }
     setStatus(null);
     try {
       await buyGiftcard({ shop: shop.trim(), date, balance, source });
-      setStatus({ ok: true, msg: 'Giftcard purchased (2 linked transactions).' });
+      setStatus({ ok: true, msg: 'Giftcard purchased. Cash converted to store credit.' });
       onSaved?.();
       if (shouldClose) {
         onClose?.();

@@ -26,7 +26,7 @@ export default function Dashboard({ data }) {
           label="Net Worth"
           value={summary.netWorth}
           tone="accent"
-          sublabel="Across all sources"
+          sublabel="Cash sources plus giftcard balances"
         />
         <StatCard
           label="This Month Income"

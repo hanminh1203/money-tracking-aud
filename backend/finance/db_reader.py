@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db.models import Case, DecimalField, Q, QuerySet, Sum, Value, When
+from django.db.models import Case, DecimalField, F, Q, QuerySet, Sum, Value, When
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
@@ -212,9 +212,7 @@ def _base_queryset(*, user: User, source: str | None = None) -> QuerySet[Transac
     qs = _tx_queryset(user=user).order_by('-date', '-creation_date')
     name = (source or '').strip()
     if name:
-        qs = qs.filter(
-            Q(payments__source__name=name) | Q(giftcard_payments__giftcard__shop=name)
-        ).distinct()
+        qs = qs.filter(payments__source__name=name).distinct()
     return qs
 
 
@@ -271,8 +269,37 @@ def get_transaction_data(
     }
 
 
+def _cash_ledger_total(*, user: User) -> Decimal:
+    """Signed Payment amounts (cash/bank sources), excluding giftcard funding.
+
+    Giftcard spend is tracked on Giftcard.balance, so including transaction.change
+    for giftcard-funded amounts would double-count net worth.
+    """
+    money = DecimalField(max_digits=14, decimal_places=2)
+    zero = Value(0, output_field=money)
+    total = Payment.objects.filter(user=user).aggregate(
+        total=Sum(
+            Case(
+                When(transaction__change__lt=0, then=-F('amount')),
+                When(transaction__change__gt=0, then=F('amount')),
+                default=zero,
+                output_field=money,
+            )
+        )
+    )['total']
+    return total or Decimal('0')
+
+
 def get_dashboard_data(*, user: User) -> dict:
-    """Return all dashboard metrics, breakdowns, and current-month rows."""
+    """Return all dashboard metrics, breakdowns, and current-month rows.
+
+    Net worth is the cash ledger (signed source Payments) plus remaining
+    giftcard balances. Buying a giftcard is a cash→asset conversion: a
+    Payment reduces the cash ledger while Giftcard.balance increases by the
+    same amount. Using a giftcard is an Expense (transaction.change) and
+    reduces Giftcard.balance; the expense is counted once in P&L and once
+    in net worth (via the balance drop), not again via the cash ledger.
+    """
     current_month = timezone.localdate().replace(day=1)
     first_month = _shift_month(current_month, -2)
     next_month = _shift_month(current_month, 1)
@@ -303,11 +330,11 @@ def get_dashboard_data(*, user: User) -> dict:
     )
     income = totals['income'] or Decimal('0')
     expense = totals['expense'] or Decimal('0')
-    tx_total = user_txs.aggregate(total=Sum('change'))['total'] or Decimal('0')
+    cash_total = _cash_ledger_total(user=user)
     giftcard_total = Giftcard.objects.filter(user=user).aggregate(
         total=Sum('balance')
     )['total'] or Decimal('0')
-    net_worth = tx_total + giftcard_total
+    net_worth = cash_total + giftcard_total
 
     breakdown_rows = (
         user_txs.filter(
