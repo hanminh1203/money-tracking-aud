@@ -224,7 +224,7 @@ def transactions(request: HttpRequest) -> JsonResponse:
     return JsonResponse(result)
 
 
-@require_http_methods(['GET', 'PUT'])
+@require_http_methods(['GET', 'PUT', 'DELETE'])
 @require_auth
 def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
     user: User = request.finance_user  # type: ignore[attr-defined]
@@ -235,9 +235,17 @@ def get_transaction(request: HttpRequest, transaction_id: str) -> JsonResponse:
             return json_error(str(exc), status=exc.status)
         return JsonResponse(data)
 
+    client = sheets_for(request)
+    if request.method == 'DELETE':
+        try:
+            result = client.delete_transaction(transaction_id)
+        except (ValueError, SheetsError, DualWriteError) as exc:
+            return json_sheets_write_error(exc)
+        return JsonResponse(result)
+
     try:
         body = parse_json(request)
-        result = sheets_for(request).update_transaction(
+        result = client.update_transaction(
             transaction_id,
             date=body.get('date'),
             amount=body.get('amount'),

@@ -850,6 +850,32 @@ class SheetsClient:
             if rows:
                 self.delete_table_rows_at(table_name, rows)
 
+    def _delete_rows_matching(
+        self,
+        table_name: str,
+        *,
+        match_column: str,
+        match_values: list[Any],
+    ) -> list[int]:
+        """Find and delete sheet rows whose column matches any of the values."""
+        rows: list[int] = []
+        seen: set[int] = set()
+        for value in match_values:
+            text = str(value or '').strip()
+            if not text:
+                continue
+            for row in self.find_matching_sheet_rows(
+                table_name,
+                match_column=match_column,
+                match_value=text,
+            ):
+                if row not in seen:
+                    seen.add(row)
+                    rows.append(row)
+        if rows:
+            self.delete_table_rows_at(table_name, rows)
+        return rows
+
     def append_funding_rows(
         self,
         *,
@@ -1480,6 +1506,121 @@ class SheetsClient:
             'updated': 1,
             'receiptUpdated': bool(linked_receipt),
             'items': len(normalized_items or []),
+        }
+
+    def delete_transaction(self, transaction_id: str) -> dict:
+        """Remove a transaction and related sheet rows, then dual-write Postgres.
+
+        Unwinds Payments, GiftcardPayments (crediting giftcard balances), the
+        1:1 Receipt and Receipt_Items, and Product_Items linked via the
+        transaction or those receipt items. Giftcard catalog rows are kept.
+        Transfers are two independent transactions — only this id is deleted.
+        """
+        from django.core.exceptions import ValidationError
+        from django.db.models import Q
+        from finance.models import ProductItem, Receipt as ReceiptModel, Transaction
+
+        tid = str(transaction_id or '').strip()
+        if not tid:
+            raise SheetsError('Transaction ID is required')
+
+        try:
+            tx = (
+                Transaction.objects.filter(user=self.user)
+                .select_related('receipt')
+                .prefetch_related(
+                    'payments',
+                    'giftcard_payments',
+                    'product_items',
+                    'receipt__items',
+                )
+                .get(pk=tid)
+            )
+        except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
+            raise SheetsError('Transaction not found', status=404) from exc
+
+        try:
+            linked_receipt = tx.receipt
+        except ReceiptModel.DoesNotExist:
+            linked_receipt = None
+
+        receipt_item_ids = []
+        if linked_receipt is not None:
+            receipt_item_ids = [str(item.id) for item in linked_receipt.items.all()]
+
+        product_item_ids = [
+            str(pi.id)
+            for pi in ProductItem.objects.filter(user=self.user).filter(
+                Q(transaction=tx) | Q(receipt_item_id__in=receipt_item_ids)
+            )
+        ]
+
+        giftcard_credits = db_writer.plan_giftcard_credits(
+            user=self.user,
+            giftcard_payments=list(tx.giftcard_payments.all()),
+        )
+
+        # Credit giftcards first (SET from Postgres current + debit) so a
+        # retried delete does not double-add while Postgres still has the tx.
+        self.apply_giftcard_debits(
+            [
+                {
+                    'giftcard_id': row['giftcard_id'],
+                    'new_balance': float(row['new_balance']),
+                    'row_number': row['row_number'],
+                }
+                for row in giftcard_credits
+            ]
+        )
+
+        self._delete_rows_matching(
+            settings.PRODUCT_ITEMS_TABLE,
+            match_column='Product Item ID',
+            match_values=product_item_ids,
+        )
+        self._delete_rows_matching(
+            settings.PRODUCT_ITEMS_TABLE,
+            match_column='Transaction ID',
+            match_values=[tid],
+        )
+        if receipt_item_ids:
+            self._delete_rows_matching(
+                settings.PRODUCT_ITEMS_TABLE,
+                match_column='Receipt Item ID',
+                match_values=receipt_item_ids,
+            )
+        if linked_receipt is not None:
+            rid = str(linked_receipt.id)
+            self._delete_rows_matching(
+                settings.RECEIPT_ITEMS_TABLE,
+                match_column='Receipt ID',
+                match_values=[rid],
+            )
+            self._delete_rows_matching(
+                settings.RECEIPT_TABLE,
+                match_column='Receipt ID',
+                match_values=[rid],
+            )
+        self.delete_funding_rows_for_transaction(tid)
+        tx_rows = self.find_matching_sheet_rows(
+            settings.TRANSACTIONS_TABLE,
+            match_column=TRANSACTION_ID_COLUMN,
+            match_value=tid,
+        )
+        if tx_rows:
+            self.delete_table_rows_at(settings.TRANSACTIONS_TABLE, tx_rows)
+
+        db_writer.delete_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            giftcard_credits=giftcard_credits,
+        )
+        return {
+            'id': tid,
+            'deleted': True,
+            'receiptDeleted': bool(linked_receipt),
+            'productItemsDeleted': len(product_item_ids),
+            'giftcardsCredited': len(giftcard_credits),
         }
 
     def buy_giftcard(

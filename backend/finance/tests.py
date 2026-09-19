@@ -2543,3 +2543,367 @@ class DualWriteCreateFailureTests(TestCase):
             )
         self.assert_dual_write_http_error(response)
         self.assertEqual(Product.objects.filter(user=self.user).count(), 0)
+
+
+class DeleteTransactionTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='delete-tx@example.com', sheet_id='sheet-del')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.savings = Source.objects.create(user=self.user, name='Savings', type='Bank')
+        self.groceries = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.exchange = Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='Transfer',
+        )
+        self.giftcard = Giftcard.objects.create(
+            user=self.user,
+            row_number=4,
+            shop='Coles',
+            date=date(2026, 1, 1),
+            balance=Decimal('20.00'),
+        )
+        self.product = Product.objects.create(user=self.user, name='Milk')
+
+    def add_transaction(self, *, row, change, category=None, comment='', source=None):
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=date(2026, 1, 8),
+            change=Decimal(change),
+            category=category or self.groceries,
+            comment=comment,
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=source or self.source,
+            amount=abs(tx.change),
+            row_number=row,
+        )
+        return tx
+
+    def test_delete_transaction_detail_removes_tx_and_payments(self):
+        from finance.db_writer import delete_transaction_detail
+
+        tx = self.add_transaction(row=1, change='-12.50', comment='Mistake')
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=tx,
+            price=Decimal('12.50'),
+        )
+        other_tx = self.add_transaction(row=2, change='-3.00', comment='Keep')
+
+        delete_transaction_detail(user=self.user, transaction=tx)
+
+        self.assertFalse(Transaction.objects.filter(pk=tx.id).exists())
+        self.assertEqual(Payment.objects.filter(transaction_id=tx.id).count(), 0)
+        self.assertEqual(ProductItem.objects.filter(transaction_id=tx.id).count(), 0)
+        self.assertTrue(Transaction.objects.filter(pk=other_tx.id).exists())
+        self.assertEqual(Payment.objects.filter(transaction=other_tx).count(), 1)
+
+    def test_delete_restores_giftcard_balance(self):
+        from finance.db_writer import delete_transaction_detail, plan_giftcard_credits
+
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=10,
+            date=date(2026, 1, 8),
+            change=Decimal('-30.00'),
+            category=self.groceries,
+            comment='Mixed',
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=self.source,
+            amount=Decimal('10.00'),
+            row_number=20,
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=tx,
+            giftcard=self.giftcard,
+            amount=Decimal('20.00'),
+            row_number=21,
+        )
+        credits = plan_giftcard_credits(
+            user=self.user,
+            giftcard_payments=list(tx.giftcard_payments.all()),
+        )
+        self.assertEqual(credits[0]['new_balance'], Decimal('40.00'))
+
+        delete_transaction_detail(
+            user=self.user,
+            transaction=tx,
+            giftcard_credits=credits,
+        )
+
+        self.assertFalse(Transaction.objects.filter(pk=tx.id).exists())
+        self.assertEqual(GiftcardPayment.objects.filter(transaction_id=tx.id).count(), 0)
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('40.00'))
+
+    def test_delete_removes_owned_receipt_and_product_links(self):
+        from finance.db_writer import delete_transaction_detail
+
+        tx = self.add_transaction(row=3, change='-8.50', comment='Woolworths : milk')
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=tx,
+            date=date(2026, 1, 8),
+            total=Decimal('8.50'),
+        )
+        item = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Milk',
+            amount=Decimal('1'),
+            unit='L',
+            money=Decimal('8.50'),
+        )
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            receipt_item=item,
+        )
+        other_tx = self.add_transaction(row=4, change='-5.00', comment='Keep product')
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            transaction=other_tx,
+            price=Decimal('5.00'),
+        )
+
+        delete_transaction_detail(user=self.user, transaction=tx)
+
+        self.assertFalse(Transaction.objects.filter(pk=tx.id).exists())
+        self.assertFalse(Receipt.objects.filter(pk=receipt.id).exists())
+        self.assertFalse(ReceiptItem.objects.filter(pk=item.id).exists())
+        self.assertEqual(ProductItem.objects.filter(user=self.user).count(), 1)
+        self.assertTrue(ProductItem.objects.filter(transaction=other_tx).exists())
+        self.assertTrue(Product.objects.filter(pk=self.product.id).exists())
+
+    def test_delete_leaves_transfer_counterpart(self):
+        from finance.db_writer import delete_transaction_detail
+
+        outgoing = self.add_transaction(
+            row=5,
+            change='-50.00',
+            category=self.exchange,
+            comment='Move to savings',
+            source=self.source,
+        )
+        incoming = self.add_transaction(
+            row=6,
+            change='50.00',
+            category=self.exchange,
+            comment='Move to savings',
+            source=self.savings,
+        )
+
+        delete_transaction_detail(user=self.user, transaction=outgoing)
+
+        self.assertFalse(Transaction.objects.filter(pk=outgoing.id).exists())
+        self.assertTrue(Transaction.objects.filter(pk=incoming.id).exists())
+        self.assertEqual(Payment.objects.get(transaction=incoming).source_id, self.savings.id)
+
+    def test_delete_postgres_failure_raises_dual_write_and_rolls_back(self):
+        from finance.db_writer import delete_transaction_detail, plan_giftcard_credits
+
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=11,
+            date=date(2026, 1, 8),
+            change=Decimal('-15.00'),
+            category=self.groceries,
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=tx,
+            giftcard=self.giftcard,
+            amount=Decimal('15.00'),
+            row_number=22,
+        )
+        credits = plan_giftcard_credits(
+            user=self.user,
+            giftcard_payments=list(tx.giftcard_payments.all()),
+        )
+
+        mock_qs = MagicMock()
+        mock_qs.delete.side_effect = RuntimeError('postgres down')
+        with patch.object(Transaction.objects, 'filter', return_value=mock_qs):
+            with self.assertRaises(DualWriteError) as ctx:
+                delete_transaction_detail(
+                    user=self.user,
+                    transaction=tx,
+                    giftcard_credits=credits,
+                )
+        self.assertIn('Sync', str(ctx.exception))
+        self.assertTrue(Transaction.objects.filter(pk=tx.id).exists())
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('20.00'))
+        self.assertEqual(GiftcardPayment.objects.filter(transaction=tx).count(), 1)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'delete_table_rows_at')
+    @patch.object(SheetsClient, 'find_matching_sheet_rows', return_value=[12])
+    def test_sheets_delete_unwinds_related_rows_then_postgres(
+        self, find_rows, delete_rows, apply_debits
+    ):
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=12,
+            date=date(2026, 1, 8),
+            change=Decimal('-25.00'),
+            category=self.groceries,
+            comment='Coles : shop',
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=self.source,
+            amount=Decimal('5.00'),
+            row_number=30,
+        )
+        GiftcardPayment.objects.create(
+            user=self.user,
+            transaction=tx,
+            giftcard=self.giftcard,
+            amount=Decimal('20.00'),
+            row_number=31,
+        )
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=tx,
+            date=date(2026, 1, 8),
+            total=Decimal('25.00'),
+        )
+        item = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Bread',
+            amount=Decimal('1'),
+            unit='loaf',
+            money=Decimal('25.00'),
+        )
+        ProductItem.objects.create(
+            user=self.user,
+            product=self.product,
+            receipt_item=item,
+        )
+
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        result = client.delete_transaction(str(tx.id))
+
+        self.assertTrue(result['deleted'])
+        self.assertTrue(result['receiptDeleted'])
+        self.assertEqual(result['giftcardsCredited'], 1)
+        apply_debits.assert_called_once()
+        self.assertEqual(apply_debits.call_args.args[0][0]['new_balance'], 40.0)
+        self.assertTrue(delete_rows.called)
+        tables = [call.args[0] for call in delete_rows.call_args_list]
+        from django.conf import settings as dj_settings
+
+        self.assertIn(dj_settings.PRODUCT_ITEMS_TABLE, tables)
+        self.assertIn(dj_settings.RECEIPT_ITEMS_TABLE, tables)
+        self.assertIn(dj_settings.RECEIPT_TABLE, tables)
+        self.assertIn(dj_settings.PAYMENT_TABLE, tables)
+        self.assertIn(dj_settings.GIFTCARD_PAYMENT_TABLE, tables)
+        self.assertIn(dj_settings.TRANSACTIONS_TABLE, tables)
+        self.assertFalse(Transaction.objects.filter(pk=tx.id).exists())
+        self.giftcard.refresh_from_db()
+        self.assertEqual(self.giftcard.balance, Decimal('40.00'))
+        self.assertGreaterEqual(find_rows.call_count, 1)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'delete_table_rows_at')
+    @patch.object(SheetsClient, 'find_matching_sheet_rows', return_value=[12])
+    def test_sheets_delete_reraises_dual_write_after_sheet_writes(
+        self, _find_rows, delete_rows, _apply_debits
+    ):
+        from finance import db_writer
+
+        tx = self.add_transaction(row=13, change='-9.00')
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        with patch.object(
+            db_writer,
+            'delete_transaction_detail',
+            side_effect=DualWriteError(),
+        ):
+            with self.assertRaises(DualWriteError) as ctx:
+                client.delete_transaction(str(tx.id))
+        self.assertIn('Sync', str(ctx.exception))
+        self.assertTrue(delete_rows.called)
+        self.assertTrue(Transaction.objects.filter(pk=tx.id).exists())
+
+    def test_delete_api_requires_authentication(self):
+        response = self.client.delete(
+            '/api/transactions/00000000-0000-0000-0000-000000000001'
+        )
+        self.assertEqual(response.status_code, 401)
+
+    @patch('finance.api_views.sheets_for')
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_delete_api_happy_path(self, _access_token, get_user, sheets_for):
+        get_user.return_value = self.user
+        tx = self.add_transaction(row=14, change='-4.00')
+        client = MagicMock()
+        client.delete_transaction.return_value = {
+            'id': str(tx.id),
+            'deleted': True,
+            'receiptDeleted': False,
+            'productItemsDeleted': 0,
+            'giftcardsCredited': 0,
+        }
+        sheets_for.return_value = client
+
+        response = self.client.delete(f'/api/transactions/{tx.id}')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['deleted'])
+        client.delete_transaction.assert_called_once_with(str(tx.id))
+
+    @patch('finance.api_views.sheets_for')
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_delete_api_dual_write_failure_is_not_success(
+        self, _access_token, get_user, sheets_for
+    ):
+        get_user.return_value = self.user
+        tx = self.add_transaction(row=15, change='-4.00')
+        client = MagicMock()
+        client.delete_transaction.side_effect = DualWriteError()
+        sheets_for.return_value = client
+
+        response = self.client.delete(f'/api/transactions/{tx.id}')
+
+        self.assertEqual(response.status_code, 500)
+        self.assertIn('Sync', response.json()['error'])
+        self.assertTrue(Transaction.objects.filter(pk=tx.id).exists())
+
+    @patch('finance.api_views.sheets_for')
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_delete_api_returns_404_for_missing(self, _access_token, get_user, sheets_for):
+        get_user.return_value = self.user
+        client = MagicMock()
+        client.delete_transaction.side_effect = SheetsError(
+            'Transaction not found', status=404
+        )
+        sheets_for.return_value = client
+
+        response = self.client.delete(
+            '/api/transactions/00000000-0000-0000-0000-000000000001'
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['error'], 'Transaction not found')
