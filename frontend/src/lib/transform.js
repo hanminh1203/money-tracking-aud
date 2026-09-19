@@ -40,6 +40,18 @@ export function formatDateShort(date) {
 }
 
 /**
+ * Calendar date in the runtime's local timezone as `yyyy-MM-dd`.
+ * Do not use `Date#toISOString().slice(0, 10)` — that is UTC and is a day
+ * behind in Australia (e.g. Perth UTC+8) during morning hours.
+ */
+export function localDateIso(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
  * Normalizes raw transaction rows into a consistent shape.
  * Joins Main Category / Type from metadata categories by sub category.
  */
@@ -75,7 +87,12 @@ export function normalizeRows(rows, categories = [], { sort = true } = {}) {
   return mapped.sort((a, b) => (a.date - b.date) || ((a.creationDate || 0) - (b.creationDate || 0)));
 }
 
-/** Running balance per source, keyed by source name -> current balance. */
+/** Running balance per cash/bank source, keyed by source name -> current balance.
+
+ * Giftcard-funded amounts are not source balances; they live on Giftcard.balance.
+ * Mixed payments only apply the Payment rows. Giftcard-only rows are skipped
+ * so shop names do not appear as fake sources.
+ */
 export function currentBalances(transactions) {
   const balances = {};
   for (const t of transactions) {
@@ -87,6 +104,9 @@ export function currentBalances(transactions) {
           balances[p.source] = (balances[p.source] || 0) + sign * amt;
         }
       }
+      continue;
+    }
+    if (t.giftcardPayments?.length) {
       continue;
     }
     if (t.source) {

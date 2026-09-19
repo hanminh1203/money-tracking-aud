@@ -49,7 +49,7 @@ export default function Giftcards({ metadata, balances, onSaved, listVersion }) 
   return (
     <PageHeader
       title="Giftcards"
-      description="Track store credit balances and record redemptions."
+      description="Buying a giftcard converts cash to store credit (net worth unchanged). Using it spends that credit once."
     >
       <div className="space-y-5">
       <PageActions>
