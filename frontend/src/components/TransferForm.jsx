@@ -1,16 +1,14 @@
 import { useRef, useState } from 'react';
 import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { addTransfer } from '../lib/api';
-import { formatAUD } from '../lib/transform';
-
-const todayISO = () => new Date().toISOString().slice(0, 10);
+import { formatAUD, localDateIso } from '../lib/transform';
 
 const cancelClass = 'btn-secondary';
 const submitClass = 'btn-secondary';
 const primaryClass = 'btn-primary';
 
 export default function TransferForm({ metadata, balances, onSaved, onClose }) {
-  const [date, setDate] = useState(todayISO());
+  const [date, setDate] = useState(localDateIso());
   const [amount, setAmount] = useState('');
   const [fromSource, setFromSource] = useState('');
   const [toSource, setToSource] = useState('');
@@ -22,7 +20,7 @@ export default function TransferForm({ metadata, balances, onSaved, onClose }) {
   const canSubmit = amount && fromSource && toSource && fromSource !== toSource && !submitting;
 
   function resetForm() {
-    setDate(todayISO());
+    setDate(localDateIso());
     setAmount('');
     setFromSource('');
     setToSource('');

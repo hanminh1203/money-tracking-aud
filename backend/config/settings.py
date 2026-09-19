@@ -78,7 +78,10 @@ CSRF_COOKIE_SAMESITE = 'Lax'
 CSRF_COOKIE_SECURE = not DEBUG
 
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'UTC'
+# Calendar dates ("today", this month, giftcard use) use this zone.
+# Australia/Perth is the default (AUD app, primary user, UTC+8, no DST).
+# Australia/Sydney would shift dates during AEDT. Not per-user: one process TZ.
+TIME_ZONE = os.environ.get('DJANGO_TIME_ZONE', 'Australia/Perth')
 USE_I18N = True
 USE_TZ = True
 

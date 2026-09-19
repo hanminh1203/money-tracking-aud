@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { addTransaction, getGiftcards } from '../lib/api';
-import { formatAUD } from '../lib/transform';
+import { formatAUD, localDateIso } from '../lib/transform';
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
 const emptyPayment = () => ({ source: '', amount: '' });
 const emptyGiftcardPayment = () => ({ giftcardId: '', amount: '' });
 
@@ -13,7 +12,7 @@ const primaryClass = 'btn-primary';
 
 export default function AddTransactionForm({ metadata, onSaved, onClose }) {
   const [type, setType] = useState('Expense');
-  const [date, setDate] = useState(todayISO());
+  const [date, setDate] = useState(localDateIso());
   const [amount, setAmount] = useState('');
   const [payments, setPayments] = useState([emptyPayment()]);
   const [giftcardPayments, setGiftcardPayments] = useState([]);
@@ -121,7 +120,7 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
 
   function resetForm() {
     setType('Expense');
-    setDate(todayISO());
+    setDate(localDateIso());
     setAmount('');
     setPayments([emptyPayment()]);
     setGiftcardPayments([]);

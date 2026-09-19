@@ -1,9 +1,11 @@
-from datetime import date
+from datetime import date, datetime, timezone as dt_timezone
 from decimal import Decimal
 import uuid
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.conf import settings
+from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 
 from finance.db_reader import (
     ReaderError,
@@ -1754,3 +1756,138 @@ class GiftcardDebitWriteTests(TestCase):
         self.assertEqual(after_use['summary']['netWorth'], 80.0)
         self.assertEqual(after_use['summary']['expense'], -20.0)
         self.assertEqual(Giftcard.objects.get(pk=giftcard_id).balance, Decimal('0.00'))
+
+    @override_settings(TIME_ZONE='Australia/Perth')
+    @patch(
+        'django.utils.timezone.now',
+        return_value=datetime(2026, 9, 18, 20, 0, tzinfo=dt_timezone.utc),
+    )
+    @patch.object(SheetsClient, 'update_table_cell_at_row')
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_rows', return_value=[8])
+    def test_use_giftcard_date_uses_perth_calendar(
+        self, append_rows, append_funding, _update, _now
+    ):
+        from finance import db_writer
+
+        gid = str(self.giftcard.id)
+        append_funding.return_value = (
+            [],
+            [
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': gid,
+                    'amount': 10.0,
+                    'row_number': 1,
+                }
+            ],
+        )
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        with patch.object(db_writer, 'save_giftcard_use') as save_use:
+            client.use_giftcard(
+                giftcard_id=gid,
+                amount=10,
+                comment='Milk',
+                sub_category='Groceries',
+            )
+
+        self.assertEqual(append_rows.call_args.args[2][0][1], '2026-09-19')
+        self.assertEqual(save_use.call_args.kwargs['date'], '2026-09-19')
+
+
+PERTH_AFTER_UTC_MIDNIGHT = datetime(2026, 9, 18, 20, 0, tzinfo=dt_timezone.utc)
+PERTH_MONTH_BOUNDARY = datetime(2026, 9, 30, 20, 0, tzinfo=dt_timezone.utc)
+
+
+class TimeZoneSettingsTests(SimpleTestCase):
+    def test_default_time_zone_is_australia_perth(self):
+        self.assertEqual(settings.TIME_ZONE, 'Australia/Perth')
+
+
+@override_settings(TIME_ZONE='Australia/Perth')
+class PerthLocalCalendarTests(TestCase):
+    """UTC calendar date can differ from Australia/Perth (UTC+8, no DST)."""
+
+    def setUp(self):
+        self.user = User.objects.create(email='perth@example.com')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.salary = Category.objects.create(
+            user=self.user,
+            main_category='Earnings',
+            sub_category='Salary',
+            type='Income',
+        )
+
+    def add_transaction(self, row, value, amount, category=None):
+        signed = Decimal(amount)
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=value,
+            change=signed,
+            category=category,
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=self.source,
+            amount=abs(signed),
+            row_number=row,
+        )
+        return tx
+
+    def test_localdate_is_next_day_while_utc_is_still_previous_evening(self):
+        # 2026-09-18 20:00 UTC = 2026-09-19 04:00 in Perth.
+        self.assertEqual(PERTH_AFTER_UTC_MIDNIGHT.date(), date(2026, 9, 18))
+        with patch('django.utils.timezone.now', return_value=PERTH_AFTER_UTC_MIDNIGHT):
+            self.assertEqual(timezone.localdate(), date(2026, 9, 19))
+
+    def test_utc_time_zone_keeps_previous_calendar_day(self):
+        with override_settings(TIME_ZONE='UTC'):
+            with patch('django.utils.timezone.now', return_value=PERTH_AFTER_UTC_MIDNIGHT):
+                self.assertEqual(timezone.localdate(), date(2026, 9, 18))
+
+    def test_dashboard_this_month_uses_perth_month_boundary(self):
+        # 2026-09-30 20:00 UTC = 2026-10-01 04:00 Perth → current month is October.
+        self.add_transaction(1, date(2026, 9, 30), '100.00', self.salary)
+        self.add_transaction(2, date(2026, 10, 1), '200.00', self.salary)
+
+        with patch('django.utils.timezone.now', return_value=PERTH_MONTH_BOUNDARY):
+            data = get_dashboard_data(user=self.user)
+
+        self.assertEqual(data['months'], ['2026/08', '2026/09', '2026/10'])
+        self.assertEqual(data['summary']['income'], 200.0)
+        self.assertEqual(
+            [transaction['date'] for transaction in data['transactions']],
+            ['2026-10-01'],
+        )
+
+    @patch(
+        'django.utils.timezone.now',
+        return_value=PERTH_AFTER_UTC_MIDNIGHT,
+    )
+    @patch('finance.groq_client._chat', return_value={'action': 'unknown', 'reason': 'x'})
+    def test_chat_today_prompt_uses_perth_date(self, chat, _now):
+        from finance.groq_client import parse_finance_message
+
+        parse_finance_message('hello', {'sources': [], 'categories': []})
+        system = chat.call_args.args[0][0]['content']
+        self.assertIn("Today's date is 2026-09-19", system)
+        self.assertNotIn("Today's date is 2026-09-18", system)
+
+    @patch(
+        'django.utils.timezone.now',
+        return_value=PERTH_AFTER_UTC_MIDNIGHT,
+    )
+    @patch(
+        'finance.groq_client._chat',
+        return_value={'store': 'X', 'date': 'blurry', 'items': []},
+    )
+    def test_receipt_fallback_date_uses_perth_date(self, _chat, _now):
+        from finance.groq_client import extract_receipt_from_image
+
+        result = extract_receipt_from_image(
+            'data:image/png;base64,xx',
+            {'sources': [], 'categories': []},
+        )
+        self.assertEqual(result['date'], '2026-09-19')
