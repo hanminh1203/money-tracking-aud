@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections import Counter
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -40,6 +41,30 @@ MIRROR_TABLE_KEYS = (
     'category',
     'sources',
 )
+
+# Fingerprint tuple field names (must match *_fp helpers below).
+FP_FIELDS: dict[str, tuple[str, ...]] = {
+    'transactions': ('id', 'date', 'change', 'comment', 'sub_category'),
+    'payment': ('id', 'transaction_id', 'source', 'amount'),
+    'giftcard_payment': ('id', 'transaction_id', 'giftcard_id', 'amount'),
+    'receipt': ('id', 'transaction_id', 'date', 'total'),
+    'receipt_items': ('id', 'receipt_id', 'name', 'amount', 'unit', 'money'),
+    'giftcards': ('row_number', 'id', 'shop', 'date', 'balance'),
+    'products': ('id', 'name'),
+    'product_items': (
+        'id',
+        'product_id',
+        'price',
+        'transaction_id',
+        'receipt_item_id',
+        'end_date',
+    ),
+    'category': ('main', 'sub', 'type'),
+    'sources': ('name', 'type'),
+}
+
+# Max entries per only_in_sheet / only_in_db / changed bucket in status diffs.
+DIFF_CAP = 50
 
 
 class SyncError(Exception):
@@ -544,12 +569,77 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
     }
 
 
-def _table_status(sheet_fps: list[tuple], db_fps: list[tuple]) -> dict:
-    return {
+def _fp_to_dict(table_key: str, fp: tuple) -> dict[str, Any]:
+    fields = FP_FIELDS[table_key]
+    return {name: fp[i] for i, name in enumerate(fields)}
+
+
+def _fp_identity(table_key: str, fp: tuple) -> Any:
+    """Stable identity for pairing sheet/db fingerprints into changed rows."""
+    if table_key == 'giftcards':
+        return fp[1]  # giftcard id (row_number is first)
+    if table_key == 'category':
+        return (fp[0], fp[1])  # main, sub
+    if table_key == 'sources':
+        return fp[0]  # name
+    return fp[0]  # primary id
+
+
+def _identity_label(table_key: str, identity: Any) -> str:
+    if table_key == 'category' and isinstance(identity, tuple):
+        return f'{identity[0]} / {identity[1]}'
+    return str(identity)
+
+
+def _table_status(table_key: str, sheet_fps: list[tuple], db_fps: list[tuple]) -> dict:
+    matched = sorted(sheet_fps) == sorted(db_fps)
+    result: dict[str, Any] = {
         'sheet_count': len(sheet_fps),
         'db_count': len(db_fps),
-        'matched': sorted(sheet_fps) == sorted(db_fps),
+        'matched': matched,
     }
+    if matched:
+        return result
+
+    sheet_extra = list((Counter(sheet_fps) - Counter(db_fps)).elements())
+    db_extra = list((Counter(db_fps) - Counter(sheet_fps)).elements())
+
+    sheet_by_id: dict[Any, list[tuple]] = {}
+    for fp in sheet_extra:
+        sheet_by_id.setdefault(_fp_identity(table_key, fp), []).append(fp)
+
+    db_by_id: dict[Any, list[tuple]] = {}
+    for fp in db_extra:
+        db_by_id.setdefault(_fp_identity(table_key, fp), []).append(fp)
+
+    only_in_sheet: list[dict[str, Any]] = []
+    only_in_db: list[dict[str, Any]] = []
+    changed: list[dict[str, Any]] = []
+
+    for ident in set(sheet_by_id) | set(db_by_id):
+        s_list = list(sheet_by_id.get(ident, []))
+        d_list = list(db_by_id.get(ident, []))
+        while s_list and d_list:
+            changed.append(
+                {
+                    'id': _identity_label(table_key, ident),
+                    'sheet': _fp_to_dict(table_key, s_list.pop(0)),
+                    'db': _fp_to_dict(table_key, d_list.pop(0)),
+                }
+            )
+        only_in_sheet.extend(_fp_to_dict(table_key, fp) for fp in s_list)
+        only_in_db.extend(_fp_to_dict(table_key, fp) for fp in d_list)
+
+    truncated = (
+        len(only_in_sheet) > DIFF_CAP
+        or len(only_in_db) > DIFF_CAP
+        or len(changed) > DIFF_CAP
+    )
+    result['only_in_sheet'] = only_in_sheet[:DIFF_CAP]
+    result['only_in_db'] = only_in_db[:DIFF_CAP]
+    result['changed'] = changed[:DIFF_CAP]
+    result['truncated'] = truncated
+    return result
 
 
 def compare_mirror(client: SheetsClient, *, user: User) -> dict:
@@ -559,7 +649,7 @@ def compare_mirror(client: SheetsClient, *, user: User) -> dict:
     db_fps = _db_fingerprints(user=user)
 
     tables = {
-        key: _table_status(sheet_fps[key], db_fps[key]) for key in MIRROR_TABLE_KEYS
+        key: _table_status(key, sheet_fps[key], db_fps[key]) for key in MIRROR_TABLE_KEYS
     }
     return {
         'matched': all(t['matched'] for t in tables.values()),

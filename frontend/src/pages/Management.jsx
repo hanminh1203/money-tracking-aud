@@ -9,6 +9,9 @@ import {
   saveManagementSettings,
   syncManagement,
 } from '../lib/api';
+import { formatDateShort } from '../lib/transform';
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const TABLES = [
   { key: 'transactions', label: 'Transactions' },
@@ -348,33 +351,159 @@ function TableCard({ label, table, checking }) {
   const matched = !checking && table?.matched;
   const status = checking ? 'checking' : matched ? 'ok' : 'mismatch';
   const styles = STATUS_STYLES[status];
+  const hasDiffs =
+    !checking &&
+    table &&
+    !table.matched &&
+    (table.only_in_sheet?.length > 0 ||
+      table.only_in_db?.length > 0 ||
+      table.changed?.length > 0 ||
+      table.truncated);
 
   return (
-    <Card
-      title={label}
-      action={
-        <span className={`inline-block w-2.5 h-2.5 rounded-full ${styles.dot}`} aria-hidden />
-      }
-    >
-      <div className="space-y-2 text-sm">
-        <p className={`font-medium ${styles.text}`}>
-          {checking ? 'Checking' : matched ? 'Matched' : 'Mismatch'}
-        </p>
-        {!checking && table && (
-          <>
-            <div>
-              <span className="text-text-muted">Google Sheet: </span>
-              <span className="text-text-primary">{table.sheet_count}</span>
-            </div>
-            <div>
-              <span className="text-text-muted">Postgres: </span>
-              <span className="text-text-primary">{table.db_count}</span>
-            </div>
-          </>
-        )}
-      </div>
-    </Card>
+    <div className={hasDiffs ? 'md:col-span-2 lg:col-span-4' : undefined}>
+      <Card
+        title={label}
+        action={
+          <span className={`inline-block w-2.5 h-2.5 rounded-full ${styles.dot}`} aria-hidden />
+        }
+      >
+        <div className="space-y-2 text-sm">
+          <p className={`font-medium ${styles.text}`}>
+            {checking ? 'Checking' : matched ? 'Matched' : 'Mismatch'}
+          </p>
+          {!checking && table && (
+            <>
+              <div>
+                <span className="text-text-muted">Google Sheet: </span>
+                <span className="text-text-primary">{table.sheet_count}</span>
+              </div>
+              <div>
+                <span className="text-text-muted">Postgres: </span>
+                <span className="text-text-primary">{table.db_count}</span>
+              </div>
+              {hasDiffs && <TableDiffDetails table={table} />}
+            </>
+          )}
+        </div>
+      </Card>
+    </div>
   );
+}
+
+function TableDiffDetails({ table }) {
+  return (
+    <div className="pt-2 mt-2 border-t border-bg-border space-y-3">
+      {table.truncated && (
+        <p className="text-xs text-amber-700 dark:text-amber-400">
+          Showing first 50 differences per category; more exist.
+        </p>
+      )}
+      <DiffBucket title="Only in Google Sheet" rows={table.only_in_sheet} tone="sheet" />
+      <DiffBucket title="Only in Postgres" rows={table.only_in_db} tone="db" />
+      <ChangedBucket rows={table.changed} />
+    </div>
+  );
+}
+
+function DiffBucket({ title, rows, tone }) {
+  if (!rows?.length) return null;
+  const border =
+    tone === 'sheet'
+      ? 'border-amber-500/30 bg-amber-500/5'
+      : 'border-expense/20 bg-expense/5';
+
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-[0.06em] text-text-muted mb-1.5">
+        {title} ({rows.length})
+      </p>
+      <ul className="space-y-1.5">
+        {rows.map((row, i) => (
+          <li
+            key={i}
+            className={`rounded-lg border px-2.5 py-2 text-xs font-mono break-all ${border}`}
+          >
+            <FieldMap fields={row} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ChangedBucket({ rows }) {
+  if (!rows?.length) return null;
+
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-[0.06em] text-text-muted mb-1.5">
+        Changed ({rows.length})
+      </p>
+      <ul className="space-y-2">
+        {rows.map((row, i) => (
+          <li
+            key={i}
+            className="rounded-lg border border-expense/30 bg-expense/5 px-2.5 py-2 text-xs space-y-1.5"
+          >
+            {row.id != null && row.id !== '' && (
+              <p className="font-medium text-text-primary font-sans">
+                id: <span className="font-mono">{String(row.id)}</span>
+              </p>
+            )}
+            <ChangedFields sheet={row.sheet || {}} db={row.db || {}} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ChangedFields({ sheet, db }) {
+  const keys = [...new Set([...Object.keys(sheet), ...Object.keys(db)])];
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono">
+      <div>
+        <p className="text-text-muted font-sans mb-0.5">Sheet</p>
+        <FieldMap fields={sheet} compare={db} />
+      </div>
+      <div>
+        <p className="text-text-muted font-sans mb-0.5">Postgres</p>
+        <FieldMap fields={db} compare={sheet} />
+      </div>
+      {keys.length === 0 && <p className="text-text-muted">No fields</p>}
+    </div>
+  );
+}
+
+function FieldMap({ fields, compare }) {
+  const entries = Object.entries(fields || {});
+  if (!entries.length) {
+    return <span className="text-text-muted">(empty)</span>;
+  }
+  return (
+    <div className="space-y-0.5">
+      {entries.map(([key, value]) => {
+        const differs = compare != null && String(compare[key] ?? '') !== String(value ?? '');
+        return (
+          <div key={key} className={differs ? 'text-expense' : 'text-text-primary'}>
+            <span className="text-text-muted">{key}=</span>
+            {formatFieldValue(key, value)}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatFieldValue(key, value) {
+  if (value == null || value === '') return '""';
+  const text = String(value);
+  if (key === 'date' || key === 'end_date' || ISO_DATE_RE.test(text)) {
+    const formatted = formatDateShort(text);
+    if (formatted) return formatted;
+  }
+  return text;
 }
 
 function formatCheckedAt(iso) {

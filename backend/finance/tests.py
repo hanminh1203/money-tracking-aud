@@ -683,7 +683,70 @@ class SyncIsolationTests(TestCase):
         without_end.save(update_fields=['end_date'])
         drifted = compare_mirror(client, user=self.user_a)
         self.assertFalse(drifted['matched'])
-        self.assertFalse(drifted['tables']['product_items']['matched'])
+        pi_status = drifted['tables']['product_items']
+        self.assertFalse(pi_status['matched'])
+        self.assertFalse(pi_status['truncated'])
+        self.assertEqual(pi_status['only_in_sheet'], [])
+        self.assertEqual(pi_status['only_in_db'], [])
+        self.assertEqual(len(pi_status['changed']), 1)
+        change = pi_status['changed'][0]
+        self.assertEqual(change['id'], str(without_end_id))
+        self.assertEqual(change['sheet']['end_date'], '')
+        self.assertEqual(change['db']['end_date'], '2026-04-01')
+
+    def test_compare_mirror_reports_only_in_sheet_and_db(self):
+        tx_id = uuid.UUID('b2c3d4e5-f6a7-8901-bcde-f12345678901')
+        sheet_product_id = uuid.UUID('c3d4e5f6-a7b8-9012-cdef-123456789012')
+        db_product_id = uuid.UUID('d4e5f6a7-b8c9-0123-def0-234567890123')
+        source = sheet_mirror(
+            transactions=[
+                {
+                    '__sheet_row': 2,
+                    'Transaction ID': str(tx_id),
+                    'Date': '2026-01-10',
+                    'Change': '-25',
+                    'Source': 'Everyday',
+                    'Comment': 'Shop',
+                    'Sub category': 'Salary',
+                    'Receipt ID': '',
+                    'Giftcard ID': '',
+                },
+            ],
+            payments=[
+                {
+                    '__sheet_row': 2,
+                    'Payment ID': 'a1a1a1a1-b2b2-c3c3-d4d4-e5e5e5e5e5e5',
+                    'Transaction ID': str(tx_id),
+                    'Source': 'Everyday',
+                    'Amount': '25',
+                },
+            ],
+            products=[
+                {'Product ID': str(sheet_product_id), 'Name': 'Milk'},
+            ],
+        )
+        client = MagicMock()
+        client.get_mirror_source_rows.return_value = source
+        sync_from_sheets(client, user=self.user_a)
+
+        # DB-only product (not in sheet)
+        Product.objects.create(user=self.user_a, id=db_product_id, name='Bread')
+        # Remove sheet-only product from DB so it appears only in sheet
+        Product.objects.filter(user=self.user_a, id=sheet_product_id).delete()
+
+        comparison = compare_mirror(client, user=self.user_a)
+        self.assertFalse(comparison['matched'])
+        products = comparison['tables']['products']
+        self.assertFalse(products['matched'])
+        self.assertEqual(products['sheet_count'], 1)
+        self.assertEqual(products['db_count'], 1)
+        self.assertEqual(products['changed'], [])
+        self.assertEqual(len(products['only_in_sheet']), 1)
+        self.assertEqual(products['only_in_sheet'][0]['id'], str(sheet_product_id))
+        self.assertEqual(products['only_in_sheet'][0]['name'], 'Milk')
+        self.assertEqual(len(products['only_in_db']), 1)
+        self.assertEqual(products['only_in_db'][0]['id'], str(db_product_id))
+        self.assertEqual(products['only_in_db'][0]['name'], 'Bread')
 
     def test_sync_rejects_invalid_end_date(self):
         tx_id = uuid.UUID('b2c3d4e5-f6a7-8901-bcde-f12345678901')
