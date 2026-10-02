@@ -561,8 +561,10 @@ def save_giftcard_purchase(
     row_number: int,
     transaction: dict,
     payment: dict,
+    income_transaction: dict | None = None,
+    income_payment: dict | None = None,
 ) -> None:
-    """Insert Giftcard + cash-out Transaction (asset conversion, not an expense)."""
+    """Insert Giftcard + cash-out Transaction; optional income cashback in same atomic."""
     owner = _require_user(user)
     try:
         gid = uuid.UUID(str(giftcard_id))
@@ -595,6 +597,30 @@ def save_giftcard_purchase(
                 payments=[payment],
                 giftcard_payments=[],
             )
+            if income_transaction is not None:
+                if income_payment is None:
+                    raise ValueError('Income payment is required when income_transaction is set')
+                income_tid = _resolve_transaction_id(income_transaction)
+                income_change = _dec(income_transaction['change'])
+                validate_funding(income_change, [income_payment], [])
+                Transaction.objects.create(
+                    id=income_tid,
+                    version=1,
+                    user=owner,
+                    row_number=int(income_transaction['row_number']),
+                    date=_parse_date(income_transaction.get('date', date)),
+                    change=income_change,
+                    comment=str(income_transaction.get('comment') or ''),
+                    category_id=_resolve_category_id(
+                        income_transaction.get('sub_category') or '', user=owner
+                    ),
+                )
+                _create_payments(
+                    owner=owner,
+                    transaction_id=income_tid,
+                    payments=[income_payment],
+                    giftcard_payments=[],
+                )
     except Exception as exc:
         logger.exception('Postgres dual-write failed for giftcard purchase %s', giftcard_id)
         raise DualWriteError() from exc

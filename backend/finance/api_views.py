@@ -339,6 +339,8 @@ def buy_giftcard(request: HttpRequest) -> JsonResponse:
             date=body.get('date'),
             balance=body.get('balance'),
             source=body.get('source'),
+            cashback=body.get('cashback'),
+            sub_category=body.get('subCategory') or '',
         )
     except (ValueError, SheetsError, DualWriteError) as exc:
         return json_sheets_write_error(exc)

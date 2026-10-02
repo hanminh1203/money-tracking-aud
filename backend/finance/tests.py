@@ -2029,6 +2029,8 @@ class GiftcardDebitWriteTests(TestCase):
             source='Everyday',
         )
         self.assertEqual(result['balance'], 20)
+        self.assertEqual(result['cashback'], 0.0)
+        self.assertEqual(result['transactions'], 1)
         tx_values = append_rows.call_args_list[1].args[2][0]
         self.assertEqual(tx_values[2], -20)
         self.assertEqual(tx_values[4], 'Exchange (self)')
@@ -2038,6 +2040,91 @@ class GiftcardDebitWriteTests(TestCase):
         self.assertEqual(tx.category.type, '')
         card = Giftcard.objects.get(pk=result['giftcardId'])
         self.assertEqual(card.balance, Decimal('20.00'))
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_rows')
+    def test_buy_giftcard_with_cashback_creates_transfer_and_income(
+        self, append_rows, append_funding, _localdate
+    ):
+        Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        cashback_cat = Category.objects.create(
+            user=self.user,
+            main_category='Rewards',
+            sub_category='Cashback',
+            type='Income',
+        )
+        append_rows.side_effect = [[4], [5], [6]]
+        transfer_payment_id = str(uuid.uuid4())
+        income_payment_id = str(uuid.uuid4())
+        append_funding.side_effect = [
+            (
+                [
+                    {
+                        'payment_id': transfer_payment_id,
+                        'source': 'Everyday',
+                        'amount': 100.0,
+                        'row_number': 7,
+                    }
+                ],
+                [],
+            ),
+            (
+                [
+                    {
+                        'payment_id': income_payment_id,
+                        'source': 'Everyday',
+                        'amount': 10.0,
+                        'row_number': 8,
+                    }
+                ],
+                [],
+            ),
+        ]
+        client = SheetsClient(access_token='token', sheet_id='sheet', user=self.user)
+        result = client.buy_giftcard(
+            shop='Coles',
+            date='2026-01-05',
+            balance=100,
+            source='Everyday',
+            cashback=10,
+            sub_category='Cashback',
+        )
+        self.assertEqual(result['balance'], 100)
+        self.assertEqual(result['cashback'], 10.0)
+        self.assertEqual(result['transactions'], 2)
+
+        transfer_values = append_rows.call_args_list[1].args[2][0]
+        self.assertEqual(transfer_values[2], -100)
+        self.assertEqual(transfer_values[4], 'Exchange (self)')
+        income_values = append_rows.call_args_list[2].args[2][0]
+        self.assertEqual(income_values[2], 10.0)
+        self.assertEqual(income_values[4], 'Cashback')
+
+        transfer_tx = Transaction.objects.get(
+            user=self.user, comment='Buy giftcard: Coles'
+        )
+        self.assertEqual(transfer_tx.change, Decimal('-100.00'))
+        self.assertEqual(transfer_tx.category.sub_category, 'Exchange (self)')
+        income_tx = Transaction.objects.get(
+            user=self.user, comment='Buy giftcard cashback: Coles'
+        )
+        self.assertEqual(income_tx.change, Decimal('10.00'))
+        self.assertEqual(income_tx.category_id, cashback_cat.id)
+        self.assertEqual(income_tx.payments.get().amount, Decimal('10.00'))
+        self.assertEqual(income_tx.payments.get().source.name, 'Everyday')
+
+        card = Giftcard.objects.get(pk=result['giftcardId'])
+        self.assertEqual(card.balance, Decimal('100.00'))
+
+        dashboard = get_dashboard_data(user=self.user)
+        self.assertEqual(dashboard['summary']['income'], 10.0)
+        self.assertEqual(dashboard['summary']['expense'], 0.0)
 
     @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
     def test_save_giftcard_purchase_and_use_single_count_dashboard(self, _localdate):
