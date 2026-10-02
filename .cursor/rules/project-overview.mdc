@@ -1,0 +1,14 @@
+---
+description: Project overview and non-negotiable rules for Money Tracking Dashboard
+alwaysApply: true
+---
+
+Read `AGENTS.md` before making changes. Key rules:
+
+- Vite + React SPA in `frontend/`, Django 6 API in `backend/` (single app `finance`), JSON under `/api/*`.
+- Postgres is the read SoT; Google Sheets is written first, then dual-write to Postgres. Dual-write failure after sheet success must not return success.
+- Per-user isolation via signed-in user and `sheet_id`.
+- Google OAuth + signed session cookies; CSRF on mutating SPA requests (`X-CSRFToken`).
+- Secrets (`GOOGLE_*`, `GROQ_*`) server-only; sync new env vars with `.env.example` and `setup-env.ps1`.
+- Same-origin `/api` (Vite proxy locally, Vercel Services in production).
+- Finish by running `python manage.py test finance` and/or `npm test` + `npm run build` for the side you changed.

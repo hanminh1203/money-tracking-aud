@@ -1,0 +1,13 @@
+---
+description: Google OAuth, session, and CSRF rules
+globs: backend/finance/oauth.py,backend/finance/api_views.py,backend/config/settings.py,frontend/src/lib/api.js,frontend/src/hooks/useAuth.js
+alwaysApply: false
+---
+
+- Google OAuth authorization-code flow; tokens and `finance_user_id` live in signed Django session cookies, not localStorage.
+- `GET /api/auth/me` is used to establish session/CSRF for the SPA (`@ensure_csrf_cookie` on the backend).
+- Mutating API calls from the browser must send `X-CSRFToken` from the `csrftoken` cookie.
+- Production requires `CSRF_TRUSTED_ORIGINS` and `FRONTEND_URL` aligned with the app host; OAuth redirect URI must match Google Cloud console.
+- Each user's **spreadsheet ID** is stored per user (Management settings), not as a global Vercel secret.
+- Never log OAuth refresh tokens, access tokens, or Groq API keys. Never commit `.env` files.
+- Rotating `DJANGO_SECRET_KEY` invalidates all sessions; users must sign in again.

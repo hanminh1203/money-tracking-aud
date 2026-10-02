@@ -2,6 +2,8 @@
 
 Personal finance dashboard backed by your **"Money Tracking - AUD"** Google Sheet. React (Vite) frontend + Django API in one monorepo, deployable to Vercel.
 
+**For AI coding agents:** read [AGENTS.md](AGENTS.md) first.
+
 ```
 Browser (React SPA)
    │  session cookie
@@ -96,6 +98,6 @@ See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full runbook (pooler URLs
 
 - Sessions use **signed cookies** (no DB rows required for auth).
 - Postgres (Docker) stores **Transactions**, **Receipt**, **Receipt_Items**, **Category**, **Sources**, **Giftcard**, **Product**, **Product_Items**, **Payment**, and **GiftcardPayment** (`id` UUID + `version` on every table; `Receipt.id` equals sheet `Receipt ID`, `Transaction.id` equals sheet `Transaction ID`). Receipt rows link to a transaction via `Transaction ID`. Transaction category FKs point at Category by sub category; funding is via Payment / GiftcardPayment. Dashboard **net worth** is signed source Payments plus remaining giftcard balances (buying a giftcard is cash→credit, not an expense; using it is the expense). Dashboard/history and receipt detail read from Postgres; an empty DB needs **Management → Sync** once to load historical sheet data.
-- Creates dual-write: Sheets append first, then Postgres mirror after success.
+- Writes dual-write: Sheets first, then Postgres mirror; dual-write failure after a successful sheet write must not return success.
 - CSRF: `GET /api/auth/me` sets the `csrftoken` cookie; the SPA sends `X-CSRFToken` on mutating requests.
-- Append-only writes — no edit/delete of existing sheet rows.
+- Some flows support update/delete on sheet rows with the same dual-write contract; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

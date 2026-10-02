@@ -1,0 +1,14 @@
+---
+description: Vite, React, and Tailwind conventions for the frontend
+globs: frontend/**/*.{js,jsx,css}
+alwaysApply: false
+---
+
+- Vite 5, React 18, JavaScript (not TypeScript). react-router-dom for routes in `App.jsx` and `pages/`.
+- All API calls go through `src/lib/api.js` with relative `/api/...` URLs. Include CSRF header on mutating requests.
+- Auth state via `hooks/useAuth.js`; finance data via `hooks/useFinanceData.js` where applicable.
+- Display dates with `formatDateShort` from `src/lib/transform.js` (`dd/MM/yyyy`); see `.cursor/rules/date-display-format.mdc`.
+- Styling: Tailwind + Quiet Ledger tokens in `design-system/finance-dashboard/MASTER.md` (IBM Plex, dense dashboard, AUD income/expense colours).
+- Components in `src/components/`, pages in `src/pages/`. Keep forms and tables consistent with existing patterns (Modal, NavBar).
+- Tests: `node --test` on `src/lib/transform.test.js` today; add tests next to new pure logic when you touch it.
+- Receipt images may use `heic2any`; keep processing client-side only for format conversion, not for secrets.
