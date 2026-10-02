@@ -1,0 +1,14 @@
+---
+description: Django conventions for the backend
+globs: backend/**/*.py
+alwaysApply: false
+---
+
+- Python 3.12, Django 6. Single app: `finance` (models, `api_views.py`, `urls.py`, sheets/db modules).
+- No DRF: function-based views return JSON; use `@require_auth` and existing error patterns (`JsonExceptionMiddleware`).
+- Keep views thin; Sheets logic in `sheets_client.py`, Postgres in `db_reader.py` / `db_writer.py` / `db_sync.py`, funding rules in `funding.py`.
+- Always scope data to the authenticated user and their spreadsheet.
+- Model changes need a migration committed with the change. CI runs `makemigrations --check --dry-run`.
+- Database must work behind Supabase transaction pooler: `conn_max_age=0`, no server-side cursors, `prepare_threshold=None` in settings — do not add `conn_max_age`.
+- Tests: Django test runner in `finance/tests.py`. Cover success, validation, auth, cross-user isolation, and dual-write failure where relevant.
+- Time zone default is `Australia/Perth` unless settings say otherwise.
