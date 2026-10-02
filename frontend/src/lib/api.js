@@ -166,7 +166,7 @@ export async function fetchHealth() {
     headers: {},
   };
 
-  const res = await fetch('/api/health', opts);
+  const res = await fetch('/api/management/health', opts);
   const text = await res.text();
   let data = null;
   if (text) {

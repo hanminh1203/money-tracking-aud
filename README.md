@@ -34,7 +34,7 @@ Local development needs Docker Desktop and a Postgres container:
 docker compose up -d
 ```
 
-Defaults match [`backend/.env.example`](backend/.env.example): user/password/db `finance` on `127.0.0.1:5432`.
+Defaults match [`backend/.env.example`](backend/.env.example): `DATABASE_URL=postgres://finance:finance@127.0.0.1:5432/finance`.
 
 Or use [`start.bat`](start.bat), which starts the container, waits until it is healthy, runs `migrate`, then launches Django and Vite.
 
@@ -54,7 +54,7 @@ cd backend
 cp .env.example .env
 # fill DJANGO_SECRET_KEY, GOOGLE_*, GROQ_API_KEY, …
 # (each user sets their Google Spreadsheet ID in the Management page)
-# Postgres defaults in .env.example match docker compose
+# Postgres defaults in .env.example match docker compose (`DATABASE_URL`)
 py -3 -m venv .venv
 .\.venv\Scripts\activate          # Windows
 # source .venv/bin/activate       # macOS/Linux
@@ -89,18 +89,8 @@ The app expects Google Sheets **Insert → Table** names (configurable via env):
 
 ## Deploy on Vercel
 
-One project for the whole repo. Root [`vercel.json`](vercel.json) defines two **Services** (Vite frontend + Django backend) and rewrites `/api/*` to Django.
-
-1. Import the GitHub repo in Vercel; set framework to **Services** if prompted.
-2. Add env vars from [`backend/.env.example`](backend/.env.example), with production values:
-   - `GOOGLE_REDIRECT_URI=https://<domain>/api/auth/google/callback`
-   - `FRONTEND_URL=https://<domain>`
-   - `CSRF_TRUSTED_ORIGINS=https://<domain>`
-   - `DJANGO_DEBUG=false`
-   - `ALLOWED_HOSTS=.vercel.app,<your-domain>`
-   - `POSTGRES_*` pointing at a reachable Postgres instance (required; local Docker defaults are not for production)
-3. Add the production redirect URI on the Google OAuth client.
-4. Deploy.
+One project for the whole repo (Vite frontend + Django backend) with Supabase Postgres.
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full runbook (pooler URLs, env vars, migrations, OAuth).
 
 ## Local architecture notes
 

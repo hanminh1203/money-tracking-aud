@@ -1630,7 +1630,11 @@ class SheetsClient:
         date: str,
         balance: Any,
         source: str,
+        cashback: Any = None,
+        sub_category: str = '',
     ) -> dict:
+        from finance.models import Category
+
         shop_name = (shop or '').strip()
         payment_source = (source or '').strip()
         if not date:
@@ -1648,10 +1652,36 @@ class SheetsClient:
         if not abs_amt:
             raise SheetsError('Invalid balance')
 
+        if cashback is None or cashback == '':
+            cashback_amt = 0.0
+        else:
+            try:
+                cashback_amt = float(cashback)
+            except (TypeError, ValueError):
+                raise SheetsError('Invalid cashback')
+            if cashback_amt < 0:
+                raise SheetsError('Cashback cannot be negative')
+        cashback_amt = round(cashback_amt * 100) / 100
+        if cashback_amt > abs_amt + 0.009:
+            raise SheetsError(
+                f'Cashback ({cashback_amt}) cannot exceed balance ({abs_amt})'
+            )
+
+        income_category = (sub_category or '').strip()
+        if cashback_amt > 0:
+            if not income_category:
+                raise SheetsError('Income subcategory is required when cashback is set')
+            try:
+                cat = Category.objects.get(user=self.user, sub_category=income_category)
+            except Category.DoesNotExist as exc:
+                raise SheetsError(f'Sub category {income_category!r} not found') from exc
+            if cat.type != 'Income':
+                raise SheetsError('Sub category must be an Income category')
+
         giftcard_id = str(uuid.uuid4())
         note = f'Buy giftcard: {shop_name}'
         # Asset conversion, not consumption — same category as cash transfers.
-        sub_category = TRANSFER_SUB_CATEGORY
+        transfer_sub_category = TRANSFER_SUB_CATEGORY
 
         gc_row_numbers = self.append_rows(
             settings.GIFTCARD_TABLE,
@@ -1662,13 +1692,40 @@ class SheetsClient:
         tx_row_numbers = self.append_rows(
             settings.TRANSACTIONS_TABLE,
             INPUT_COLUMNS,
-            [[debit_tx_id, date, -abs_amt, note, sub_category]],
+            [[debit_tx_id, date, -abs_amt, note, transfer_sub_category]],
         )
         saved_payments, _ = self.append_funding_rows(
             transaction_id=debit_tx_id,
             payments=[{'source': payment_source, 'amount': abs_amt}],
             giftcard_payments=[],
         )
+
+        income_transaction = None
+        income_payment = None
+        tx_count = 1
+        if cashback_amt > 0:
+            income_tx_id = str(uuid.uuid4())
+            income_note = f'Buy giftcard cashback: {shop_name}'
+            income_tx_row_numbers = self.append_rows(
+                settings.TRANSACTIONS_TABLE,
+                INPUT_COLUMNS,
+                [[income_tx_id, date, cashback_amt, income_note, income_category]],
+            )
+            income_payments, _ = self.append_funding_rows(
+                transaction_id=income_tx_id,
+                payments=[{'source': payment_source, 'amount': cashback_amt}],
+                giftcard_payments=[],
+            )
+            income_transaction = {
+                'transaction_id': income_tx_id,
+                'date': date,
+                'change': cashback_amt,
+                'comment': income_note,
+                'sub_category': income_category,
+                'row_number': income_tx_row_numbers[0],
+            }
+            income_payment = income_payments[0]
+            tx_count = 2
 
         db_writer.save_giftcard_purchase(
             user=self.user,
@@ -1682,17 +1739,20 @@ class SheetsClient:
                 'date': date,
                 'change': -abs_amt,
                 'comment': note,
-                'sub_category': sub_category,
+                'sub_category': transfer_sub_category,
                 'row_number': tx_row_numbers[0],
             },
             payment=saved_payments[0],
+            income_transaction=income_transaction,
+            income_payment=income_payment,
         )
         return {
             'giftcardId': giftcard_id,
             'shop': shop_name,
             'date': date,
             'balance': abs_amt,
-            'transactions': 1,
+            'cashback': cashback_amt,
+            'transactions': tx_count,
         }
 
     def use_giftcard(

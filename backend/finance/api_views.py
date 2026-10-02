@@ -339,6 +339,8 @@ def buy_giftcard(request: HttpRequest) -> JsonResponse:
             date=body.get('date'),
             balance=body.get('balance'),
             source=body.get('source'),
+            cashback=body.get('cashback'),
+            sub_category=body.get('subCategory') or '',
         )
     except (ValueError, SheetsError, DualWriteError) as exc:
         return json_sheets_write_error(exc)
@@ -521,8 +523,14 @@ def _check_google_sheet(client: SheetsClient) -> dict:
 
 
 @require_GET
-@require_auth
 def health(request: HttpRequest) -> JsonResponse:
+    """Unauthenticated liveness probe for deploy smoke tests."""
+    return JsonResponse({'status': 'ok'})
+
+
+@require_GET
+@require_auth
+def management_health(request: HttpRequest) -> JsonResponse:
     db_check = _check_database()
     user: User = request.finance_user  # type: ignore[attr-defined]
     if not (user.sheet_id or '').strip():

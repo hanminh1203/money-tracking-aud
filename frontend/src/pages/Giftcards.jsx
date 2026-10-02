@@ -49,7 +49,7 @@ export default function Giftcards({ metadata, balances, onSaved, listVersion }) 
   return (
     <PageHeader
       title="Giftcards"
-      description="Buying a giftcard converts cash to store credit (net worth unchanged). Using it spends that credit once."
+      description="Buying a giftcard converts cash to store credit. Redeeming cashback adds income and increases net worth by that amount."
     >
       <div className="space-y-5">
       <PageActions>
