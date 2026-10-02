@@ -1,9 +1,12 @@
-name: Run Database Migrations
+name: Migrate database
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+    paths: ["backend/**"]
+  workflow_dispatch:
+
+concurrency: migrate-production
 
 jobs:
   migrate:
@@ -11,24 +14,18 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      DJANGO_DEBUG: "false"
+      # Placeholder: migrations do not sign cookies, but settings require a secret when debug is off.
+      DJANGO_SECRET_KEY: migrate-only-placeholder-not-used-for-signing
+      # Supabase SESSION pooler URL (port 5432 on the pooler host). Direct connections are IPv6-only.
+      DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Install Vercel CLI
-        run: npm install -g vercel
-
-      - name: Pull env vars from Vercel
-        run: vercel env pull .env --token=${{ secrets.VERCEL_TOKEN }} --environment=production
-
-      - name: Run migrations
-        run: |
-          export $(cat .env | xargs)
-          python manage.py migrate
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python manage.py migrate --noinput

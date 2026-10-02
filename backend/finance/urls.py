@@ -25,6 +25,7 @@ urlpatterns = [
     path('product-items/<str:product_item_id>', api_views.product_item_detail, name='product_item_detail'),
     path('assistant/parse', api_views.assistant_parse, name='assistant_parse'),
     path('health', api_views.health, name='health'),
+    path('management/health', api_views.management_health, name='management_health'),
     path('management/status', api_views.management_status, name='management_status'),
     path('management/sync', api_views.management_sync, name='management_sync'),
     path('management/export', api_views.management_export, name='management_export'),

@@ -3,17 +3,25 @@
 import os
 from pathlib import Path
 
+import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-dev-only-change-me')
-DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() in ('1', 'true', 'yes')
+DEBUG = os.environ.get('DJANGO_DEBUG', 'false').lower() in ('1', 'true', 'yes')
+
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', '')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'django-insecure-dev-only-change-me'
+    else:
+        raise ImproperlyConfigured('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false.')
 
 ALLOWED_HOSTS = [
     h.strip()
-    for h in os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,.vercel.app').split(',')
+    for h in os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
     if h.strip()
 ]
 
@@ -54,20 +62,17 @@ TEMPLATES = [
     },
 ]
 
-# Sheets remain the source of truth for reads. Postgres mirrors writes for
-# Transactions / Receipt / Receipt_Items (local Docker by default).
+# Local Docker default; production uses DATABASE_URL (Supabase transaction pooler).
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('POSTGRES_DB', 'finance'),
-        'USER': os.environ.get('POSTGRES_USER', 'finance'),
-        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'finance'),
-        'HOST': os.environ.get('POSTGRES_HOST', '127.0.0.1'),
-        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
-        # Named cursors break under transaction-mode poolers (PgBouncer / Supabase / Neon).
-        'DISABLE_SERVER_SIDE_CURSORS': True,
-    }
+    'default': dj_database_url.config(
+        default='postgres://finance:finance@127.0.0.1:5432/finance',
+        conn_max_age=0,  # serverless: never hold connections between invocations
+    )
 }
+if DATABASES['default']['ENGINE'] == 'django.db.backends.postgresql':
+    # Supabase transaction pooler (port 6543): no server-side cursors, no prepared statements.
+    DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+    DATABASES['default'].setdefault('OPTIONS', {})['prepare_threshold'] = None
 
 SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
 SESSION_COOKIE_HTTPONLY = True
