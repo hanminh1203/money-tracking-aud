@@ -55,10 +55,25 @@ export function logout() {
   return api('/auth/logout', { method: 'POST' });
 }
 
-export function getTransactionData({ page, source } = {}) {
+export function getTransactionData({
+  page,
+  source,
+  q,
+  categories,
+  includeExchange,
+} = {}) {
   const params = new URLSearchParams();
   if (page != null) params.set('page', String(page));
   if (source) params.set('source', source);
+  if (q) params.set('q', q);
+  if (categories?.length) {
+    for (const category of categories) {
+      if (category) params.append('category', category);
+    }
+  }
+  if (includeExchange != null) {
+    params.set('includeExchange', includeExchange ? '1' : '0');
+  }
   const qs = params.toString();
   return api(`/transactions${qs ? `?${qs}` : ''}`);
 }

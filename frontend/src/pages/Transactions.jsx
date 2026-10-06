@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import Card from '../components/Card';
 import Modal from '../components/Modal';
 import PageHeader, { PageActions } from '../components/PageHeader';
+import TransactionFilters from '../components/TransactionFilters';
 import TransactionList from '../components/TransactionList';
 import AddTransactionForm from '../components/AddTransactionForm';
 import TransferForm from '../components/TransferForm';
@@ -11,6 +12,8 @@ import { normalizeRows } from '../lib/transform';
 
 const LIST_DELETE_CONFIRM =
   'Delete this transaction? Payments, its receipt (if any), and product links will be removed. Giftcard spend will be credited back. The other side of a transfer is not deleted. This cannot be undone.';
+
+const SEARCH_DEBOUNCE_MS = 300;
 
 export default function Transactions({ metadata, balances, onSaved, listVersion }) {
   const [modal, setModal] = useState(null);
@@ -23,13 +26,31 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
   const [error, setError] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
 
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [selectedCategories, setSelectedCategories] = useState([]);
+  const [includeExchange, setIncludeExchange] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       setError(null);
       try {
-        const data = await getTransactionData({ page });
+        const data = await getTransactionData({
+          page,
+          q: debouncedSearch || undefined,
+          categories: selectedCategories.length ? selectedCategories : undefined,
+          includeExchange,
+        });
         if (cancelled) return;
         setRows(normalizeRows(data.rows, metadata.categories, { sort: false }));
         setPageSize(data.pageSize);
@@ -45,7 +66,24 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
     return () => {
       cancelled = true;
     };
-  }, [page, listVersion, metadata.categories]);
+  }, [
+    page,
+    listVersion,
+    metadata.categories,
+    debouncedSearch,
+    selectedCategories,
+    includeExchange,
+  ]);
+
+  function handleCategoriesChange(next) {
+    setSelectedCategories(next);
+    setPage(1);
+  }
+
+  function handleIncludeExchangeChange(next) {
+    setIncludeExchange(next);
+    setPage(1);
+  }
 
   function closeModal() {
     setModal(null);
@@ -83,6 +121,18 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
           Add Receipt
         </button>
       </PageActions>
+
+      <Card title="Filters">
+        <TransactionFilters
+          search={search}
+          onSearchChange={setSearch}
+          categories={metadata.categories}
+          selectedCategories={selectedCategories}
+          onCategoriesChange={handleCategoriesChange}
+          includeExchange={includeExchange}
+          onIncludeExchangeChange={handleIncludeExchangeChange}
+        />
+      </Card>
 
       <Card title="All Transactions">
         {error && <div className="mb-3 text-sm text-expense">{error}</div>}

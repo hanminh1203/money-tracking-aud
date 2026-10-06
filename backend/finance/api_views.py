@@ -182,6 +182,18 @@ def logout(request: HttpRequest) -> JsonResponse:
     return JsonResponse({'ok': True})
 
 
+def _parse_optional_bool(value: str | None, *, default: bool) -> bool:
+    """Parse a query-string bool; absent/blank uses default."""
+    if value is None or str(value).strip() == '':
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in ('1', 'true', 'yes'):
+        return True
+    if normalized in ('0', 'false', 'no'):
+        return False
+    raise ValueError('includeExchange must be a boolean')
+
+
 def _parse_positive_int(value: str | None, name: str) -> int | None:
     if value is None or value == '':
         return None
@@ -202,7 +214,21 @@ def transactions(request: HttpRequest) -> JsonResponse:
         try:
             page = _parse_positive_int(request.GET.get('page'), 'page')
             source = (request.GET.get('source') or '').strip() or None
-            data = get_transaction_data(user=user, page=page, source=source)
+            q = (request.GET.get('q') or '').strip() or None
+            categories = [
+                c.strip() for c in request.GET.getlist('category') if (c or '').strip()
+            ] or None
+            include_exchange = _parse_optional_bool(
+                request.GET.get('includeExchange'), default=True
+            )
+            data = get_transaction_data(
+                user=user,
+                page=page,
+                source=source,
+                q=q,
+                categories=categories,
+                include_exchange=include_exchange,
+            )
         except ValueError as exc:
             return json_error(str(exc))
         return JsonResponse(data)
