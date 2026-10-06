@@ -25,6 +25,7 @@ from finance.models import (
     Transaction,
     User,
 )
+from finance.sheets_client import TRANSFER_SUB_CATEGORY
 
 TRANSACTION_HEADERS = [
     'Transaction ID',
@@ -208,11 +209,28 @@ def _tx_queryset(*, user: User) -> QuerySet[Transaction]:
     )
 
 
-def _base_queryset(*, user: User, source: str | None = None) -> QuerySet[Transaction]:
+def _base_queryset(
+    *,
+    user: User,
+    source: str | None = None,
+    q: str | None = None,
+    categories: list[str] | None = None,
+    include_exchange: bool = True,
+) -> QuerySet[Transaction]:
     qs = _tx_queryset(user=user).order_by('-date', '-creation_date')
     name = (source or '').strip()
     if name:
         qs = qs.filter(payments__source__name=name).distinct()
+    query = (q or '').strip()
+    if query:
+        qs = qs.filter(
+            Q(comment__icontains=query) | Q(receipt__items__name__icontains=query)
+        ).distinct()
+    cats = [c.strip() for c in (categories or []) if (c or '').strip()]
+    if cats:
+        qs = qs.filter(category__sub_category__in=cats)
+    if not include_exchange:
+        qs = qs.exclude(category__sub_category=TRANSFER_SUB_CATEGORY)
     return qs
 
 
@@ -238,13 +256,22 @@ def get_transaction_data(
     user: User,
     page: int | None = None,
     source: str | None = None,
+    q: str | None = None,
+    categories: list[str] | None = None,
+    include_exchange: bool = True,
 ) -> dict:
     """Return sheet-shaped transaction rows from Postgres (no Main Category/Type).
 
     Without page: all matching rows for pages that need a complete history.
     With page: LIMIT/OFFSET using backend DEFAULT_PAGE_SIZE, plus total count.
     """
-    qs = _base_queryset(user=user, source=source)
+    qs = _base_queryset(
+        user=user,
+        source=source,
+        q=q,
+        categories=categories,
+        include_exchange=include_exchange,
+    )
     headers = list(TRANSACTION_HEADERS)
 
     if page is None:

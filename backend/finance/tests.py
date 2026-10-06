@@ -15,6 +15,7 @@ from finance.db_reader import (
     get_product_detail,
     get_products,
     get_transaction,
+    get_transaction_data,
 )
 from finance.db_sync import SyncError, compare_mirror, sync_from_sheets
 from finance.db_writer import (
@@ -341,8 +342,6 @@ class DashboardDataTests(TestCase):
         self.assertEqual(data['summary']['expense'], -50.0)
 
     def test_source_history_excludes_giftcard_only_shop_name(self):
-        from finance.db_reader import get_transaction_data
-
         self.add_transaction(1, date(2026, 1, 2), '40.00', self.salary)
         card = Giftcard.objects.create(
             user=self.user,
@@ -370,6 +369,240 @@ class DashboardDataTests(TestCase):
         data = get_transaction_data(user=self.user, source='Everyday')
         self.assertEqual(len(data['rows']), 1)
         self.assertEqual(data['rows'][0]['Change'], 40.0)
+
+
+class TransactionListFilterTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='list-filter@example.com')
+        self.other = User.objects.create(email='other-list-filter@example.com')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.other_source = Source.objects.create(
+            user=self.other, name='Everyday', type='Bank'
+        )
+        self.groceries = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.rent = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Rent',
+            type='Expense',
+        )
+        self.exchange = Category.objects.create(
+            user=self.user,
+            main_category='',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        self.other_groceries = Category.objects.create(
+            user=self.other,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+
+    def add_transaction(
+        self,
+        *,
+        row,
+        day,
+        amount,
+        category=None,
+        comment='',
+        user=None,
+        source=None,
+    ):
+        owner = user or self.user
+        src = source or (self.other_source if owner == self.other else self.source)
+        signed = Decimal(amount)
+        tx = Transaction.objects.create(
+            user=owner,
+            row_number=row,
+            date=day,
+            change=signed,
+            category=category,
+            comment=comment,
+        )
+        Payment.objects.create(
+            user=owner,
+            transaction=tx,
+            source=src,
+            amount=abs(signed),
+            row_number=row,
+        )
+        return tx
+
+    def test_search_matches_comment(self):
+        self.add_transaction(
+            row=1, day=date(2026, 1, 2), amount='-10.00', category=self.groceries, comment='Milk run'
+        )
+        self.add_transaction(
+            row=2, day=date(2026, 1, 3), amount='-20.00', category=self.rent, comment='Monthly rent'
+        )
+
+        data = get_transaction_data(user=self.user, q='milk')
+        self.assertEqual(len(data['rows']), 1)
+        self.assertEqual(data['rows'][0]['Comment'], 'Milk run')
+
+    def test_search_matches_receipt_item_name(self):
+        tx = self.add_transaction(
+            row=1,
+            day=date(2026, 1, 2),
+            amount='-12.50',
+            category=self.groceries,
+            comment='Store : shop',
+        )
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=tx,
+            date=date(2026, 1, 2),
+            total=Decimal('12.50'),
+        )
+        ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Organic Milk',
+            amount=Decimal('1'),
+            unit='L',
+            money=Decimal('4.50'),
+        )
+        self.add_transaction(
+            row=2, day=date(2026, 1, 3), amount='-20.00', category=self.rent, comment='Rent'
+        )
+
+        data = get_transaction_data(user=self.user, q='organic')
+        self.assertEqual(len(data['rows']), 1)
+        self.assertEqual(data['rows'][0]['id'], str(tx.id))
+
+    def test_search_no_match_returns_empty(self):
+        self.add_transaction(
+            row=1, day=date(2026, 1, 2), amount='-10.00', category=self.groceries, comment='Milk'
+        )
+
+        data = get_transaction_data(user=self.user, q='zzzz-not-found')
+        self.assertEqual(data['rows'], [])
+
+    def test_multi_category_filter(self):
+        self.add_transaction(
+            row=1, day=date(2026, 1, 2), amount='-10.00', category=self.groceries, comment='G'
+        )
+        self.add_transaction(
+            row=2, day=date(2026, 1, 3), amount='-800.00', category=self.rent, comment='R'
+        )
+        self.add_transaction(
+            row=3,
+            day=date(2026, 1, 4),
+            amount='-50.00',
+            category=self.exchange,
+            comment='Transfer',
+        )
+
+        data = get_transaction_data(
+            user=self.user, categories=['Groceries', 'Rent']
+        )
+        comments = {row['Comment'] for row in data['rows']}
+        self.assertEqual(comments, {'G', 'R'})
+
+    def test_exclude_exchange_by_default_when_flag_false(self):
+        self.add_transaction(
+            row=1, day=date(2026, 1, 2), amount='-10.00', category=self.groceries, comment='G'
+        )
+        self.add_transaction(
+            row=2,
+            day=date(2026, 1, 3),
+            amount='-50.00',
+            category=self.exchange,
+            comment='Transfer',
+        )
+
+        excluded = get_transaction_data(user=self.user, include_exchange=False)
+        self.assertEqual(len(excluded['rows']), 1)
+        self.assertEqual(excluded['rows'][0]['Comment'], 'G')
+
+        included = get_transaction_data(user=self.user, include_exchange=True)
+        self.assertEqual(len(included['rows']), 2)
+
+        omitted = get_transaction_data(user=self.user)
+        self.assertEqual(len(omitted['rows']), 2)
+
+    def test_pagination_total_reflects_filters(self):
+        for i in range(12):
+            self.add_transaction(
+                row=i + 1,
+                day=date(2026, 1, min(i + 1, 28)),
+                amount='-1.00',
+                category=self.groceries,
+                comment=f'Item {i}',
+            )
+        self.add_transaction(
+            row=100,
+            day=date(2026, 2, 1),
+            amount='-50.00',
+            category=self.exchange,
+            comment='Transfer',
+        )
+
+        data = get_transaction_data(
+            user=self.user, page=1, include_exchange=False, categories=['Groceries']
+        )
+        self.assertEqual(data['total'], 12)
+        self.assertEqual(data['totalPages'], 2)
+        self.assertEqual(len(data['rows']), 10)
+
+    def test_cross_user_isolation(self):
+        self.add_transaction(
+            row=1, day=date(2026, 1, 2), amount='-10.00', category=self.groceries, comment='Mine'
+        )
+        self.add_transaction(
+            row=1,
+            day=date(2026, 1, 2),
+            amount='-99.00',
+            category=self.other_groceries,
+            comment='Other milk',
+            user=self.other,
+        )
+
+        data = get_transaction_data(user=self.user, q='milk')
+        self.assertEqual(data['rows'], [])
+
+        mine = get_transaction_data(user=self.user, q='Mine')
+        self.assertEqual(len(mine['rows']), 1)
+        self.assertEqual(mine['rows'][0]['Comment'], 'Mine')
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_list_api_passes_filters(self, _access_token, get_user):
+        get_user.return_value = self.user
+        self.add_transaction(
+            row=1, day=date(2026, 1, 2), amount='-10.00', category=self.groceries, comment='Milk'
+        )
+        self.add_transaction(
+            row=2,
+            day=date(2026, 1, 3),
+            amount='-50.00',
+            category=self.exchange,
+            comment='Transfer',
+        )
+        self.add_transaction(
+            row=3, day=date(2026, 1, 4), amount='-800.00', category=self.rent, comment='Rent'
+        )
+
+        response = self.client.get(
+            '/api/transactions',
+            {
+                'page': '1',
+                'q': 'rent',
+                'category': ['Rent', 'Groceries'],
+                'includeExchange': '0',
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body['total'], 1)
+        self.assertEqual(body['rows'][0]['Comment'], 'Rent')
 
 
 class DashboardApiTests(TestCase):
