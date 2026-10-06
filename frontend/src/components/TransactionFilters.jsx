@@ -115,7 +115,7 @@ export default function TransactionFilters({
   }));
 
   return (
-    <div className="mb-4 grid gap-3 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_auto] sm:items-end">
+    <div className="grid gap-3 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_auto] sm:items-end">
       <Field label="Search">
         <input
           type="search"

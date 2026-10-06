@@ -122,8 +122,7 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
         </button>
       </PageActions>
 
-      <Card title="All Transactions">
-        {error && <div className="mb-3 text-sm text-expense">{error}</div>}
+      <Card title="Filters">
         <TransactionFilters
           search={search}
           onSearchChange={setSearch}
@@ -133,6 +132,10 @@ export default function Transactions({ metadata, balances, onSaved, listVersion 
           includeExchange={includeExchange}
           onIncludeExchangeChange={handleIncludeExchangeChange}
         />
+      </Card>
+
+      <Card title="All Transactions">
+        {error && <div className="mb-3 text-sm text-expense">{error}</div>}
         <TransactionList
           transactions={rows}
           page={page}
