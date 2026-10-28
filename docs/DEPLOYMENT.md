@@ -58,7 +58,39 @@ Vercel and the migrate workflow start on the same push. For a schema change that
 request can briefly arrive before the migration finishes. Make migrations backwards compatible
 (add nullable columns first, remove columns in a later release).
 
-## 5. Automatic deploys
+## 5. Backfill receipt lines for existing transactions
+
+Transactions created before descriptions and automatic receipts were required may have no receipt.
+New creates write the receipt line themselves. For rows already in the sheet, run the backfill once
+per user after this release. It is safe to run again: rows that already have a receipt are skipped.
+
+No new sheet columns. `Receipt` and `Receipt_Items` must already exist (they do on a sheet this app syncs).
+
+**Hosted app (uses the signed-in Google session):** Management → Backfill receipt lines. The button
+previews counts, then writes. Blank descriptions are stored as `(no description)`.
+
+**Shell against production data** (session pooler, not the transaction pooler):
+
+```bash
+cd backend
+GOOGLE_ACCESS_TOKEN="<access token from a signed-in session>" \
+DATABASE_URL="<session pooler url>" \
+DJANGO_DEBUG=false \
+DJANGO_SECRET_KEY="<production secret, or any 32+ char string if you only run this command>" \
+python manage.py backfill_transaction_receipts --dry-run --user-email you@example.com
+
+GOOGLE_ACCESS_TOKEN="<access token>" \
+DATABASE_URL="<session pooler url>" \
+DJANGO_DEBUG=false \
+DJANGO_SECRET_KEY="<same as above>" \
+python manage.py backfill_transaction_receipts --user-email you@example.com
+```
+
+Put `GOOGLE_ACCESS_TOKEN` in the environment, not after the command name. If the sheet write succeeds
+and Postgres does not, the command exits with an error. Run it again (it mirrors the sheet receipt)
+or use Management → Sync. Details: [transaction-receipts.md](transaction-receipts.md).
+
+## 6. Automatic deploys
 
 The Vercel project deploys on every push to `main` (production) and on pull requests (preview). Each
 preview includes both Vite and Django on the same host.
