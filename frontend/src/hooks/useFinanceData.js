@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { isSessionExpiredError } from '../lib/authRedirect';
 import { getDashboardData, getMetadata, getTransactionData } from '../lib/api';
 import { normalizeRows } from '../lib/transform';
 
@@ -37,6 +38,8 @@ export function useFinanceData(signedIn) {
       setListVersion((v) => v + 1);
     } catch (err) {
       if (id !== refreshIdRef.current) return;
+      // Session expiry navigates to /login; don't leave a data-load banner up.
+      if (isSessionExpiredError(err)) return;
       setError(err.message || String(err));
     } finally {
       if (id === refreshIdRef.current) setLoading(false);

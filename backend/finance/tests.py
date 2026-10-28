@@ -1,12 +1,15 @@
 from datetime import date, datetime, timezone as dt_timezone
 from decimal import Decimal
+import time
 import uuid
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 from django.conf import settings
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
+from finance import oauth
 from finance.db_reader import (
     ReaderError,
     get_dashboard_data,
@@ -3290,3 +3293,224 @@ class DeleteTransactionTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()['error'], 'Transaction not found')
+
+
+class SessionExpiryTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='expired@example.com', sheet_id='sheet-1')
+
+    def _save_session(self, session):
+        # Signed-cookie sessions encode the data in the cookie value, which
+        # changes on save. The test client does not copy that new value over.
+        session.save()
+        self.client.cookies[settings.SESSION_COOKIE_NAME] = session.session_key
+
+    def _sign_in(self, *, access='token', refresh='', expires_at=None, user=None):
+        user = user or self.user
+        session = self.client.session
+        session[oauth.SESSION_ACCESS] = access
+        session[oauth.SESSION_EMAIL] = user.email
+        session[oauth.SESSION_USER_ID] = str(user.id)
+        session['session_marker'] = 'keep'
+        if refresh:
+            session[oauth.SESSION_REFRESH] = refresh
+        if expires_at is not None:
+            session[oauth.SESSION_EXPIRES] = expires_at
+        self._save_session(session)
+
+    def test_anonymous_auth_me_stays_200(self):
+        response = self.client.get('/api/auth/me')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body['authenticated'])
+        self.assertIsNone(body['expiresAt'])
+        self.assertNotIn('code', body)
+
+    def test_anonymous_dashboard_is_401(self):
+        response = self.client.get('/api/dashboard')
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthenticated')
+        self.assertEqual(response.json()['error'], 'Not authenticated')
+
+    def test_expired_access_token_without_refresh_is_401_and_clears_session(self):
+        self._sign_in(expires_at=int(time.time()) - 30)
+
+        response = self.client.get('/api/dashboard')
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthenticated')
+        self.assertIsNone(self.client.session.get(oauth.SESSION_ACCESS))
+        self.assertIsNone(self.client.session.get(oauth.SESSION_EMAIL))
+        self.assertEqual(self.client.session.get('session_marker'), 'keep')
+
+        me = self.client.get('/api/auth/me')
+        self.assertEqual(me.status_code, 200)
+        self.assertFalse(me.json()['authenticated'])
+
+    def test_auth_me_expired_token_is_401(self):
+        self._sign_in(expires_at=int(time.time()) - 5)
+
+        response = self.client.get('/api/auth/me')
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthenticated')
+        self.assertIsNone(self.client.session.get(oauth.SESSION_ACCESS))
+
+    @patch(
+        'finance.oauth.refresh_access_token',
+        side_effect=oauth.AuthError('Token refresh failed: invalid_grant', status=401),
+    )
+    def test_failed_refresh_is_401_and_clears_refresh_token(self, _refresh):
+        self._sign_in(refresh='stale-refresh', expires_at=int(time.time()) - 5)
+
+        response = self.client.get('/api/transactions')
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['code'], 'unauthenticated')
+        self.assertIn('invalid_grant', response.json()['error'])
+        session = self.client.session
+        self.assertIsNone(session.get(oauth.SESSION_ACCESS))
+        self.assertIsNone(session.get(oauth.SESSION_REFRESH))
+
+    @patch('finance.oauth.refresh_access_token')
+    def test_expired_access_token_with_valid_refresh_stays_signed_in(self, refresh):
+        refresh.return_value = {'access_token': 'new-access', 'expires_in': 3600}
+        self._sign_in(refresh='good-refresh', expires_at=int(time.time()) - 5)
+
+        response = self.client.get('/api/auth/me')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body['authenticated'])
+        self.assertGreater(body['expiresAt'], int(time.time()) + 3000)
+        self.assertEqual(self.client.session[oauth.SESSION_ACCESS], 'new-access')
+        self.assertEqual(self.client.session[oauth.SESSION_REFRESH], 'good-refresh')
+
+    @patch(
+        'finance.oauth.refresh_access_token',
+        side_effect=AssertionError('valid access token must not be refreshed'),
+    )
+    def test_valid_session_still_authorises_and_reports_expiry(self, _refresh):
+        expires = int(time.time()) + 1800
+        self._sign_in(expires_at=expires)
+
+        dashboard = self.client.get('/api/dashboard')
+        self.assertEqual(dashboard.status_code, 200)
+
+        me = self.client.get('/api/auth/me')
+        self.assertEqual(me.status_code, 200)
+        body = me.json()
+        self.assertTrue(body['authenticated'])
+        self.assertEqual(body['email'], self.user.email)
+        self.assertEqual(body['expiresAt'], expires)
+        self.assertEqual(body['sheetId'], 'sheet-1')
+
+    @patch(
+        'finance.api_views.compare_mirror',
+        side_effect=SheetsError('invalid credentials', status=401),
+    )
+    def test_sheet_401_is_not_a_session_expiry(self, _compare):
+        expires = int(time.time()) + 1800
+        self._sign_in(expires_at=expires)
+
+        response = self.client.get('/api/management/status')
+
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn('code', response.json())
+        self.assertEqual(response.json()['error'], 'invalid credentials')
+        self.assertEqual(self.client.session[oauth.SESSION_ACCESS], 'token')
+
+    def test_safe_frontend_path_rejects_open_redirects(self):
+        self.assertEqual(oauth.safe_frontend_path('/transactions?q=rent'), '/transactions?q=rent')
+        self.assertEqual(oauth.safe_frontend_path('/'), '/')
+        self.assertIsNone(oauth.safe_frontend_path('https://evil.example/phish'))
+        self.assertIsNone(oauth.safe_frontend_path('//evil.example/phish'))
+        self.assertIsNone(oauth.safe_frontend_path('/%2F%2Fevil.example'))
+        self.assertIsNone(oauth.safe_frontend_path('/login'))
+        self.assertIsNone(oauth.safe_frontend_path('/login?next=/transactions'))
+        self.assertIsNone(oauth.safe_frontend_path('/api/dashboard'))
+        self.assertIsNone(oauth.safe_frontend_path('/transactions/../login'))
+        self.assertIsNone(oauth.safe_frontend_path('/\\evil.example'))
+
+    @override_settings(
+        FRONTEND_URL='http://localhost:5173',
+        GOOGLE_CLIENT_ID='test-client',
+        GOOGLE_CLIENT_SECRET='test-secret',
+        GOOGLE_REDIRECT_URI='http://localhost:5173/api/auth/google/callback',
+    )
+    def test_login_stores_only_a_safe_return_path(self):
+        kept = self.client.get('/api/auth/google/login', {'next': '/giftcards'})
+        self.assertEqual(kept.status_code, 302)
+        self.assertIn('accounts.google.com', kept['Location'])
+        self.assertEqual(self.client.session['oauth_next'], '/giftcards')
+
+        dropped = self.client.get('/api/auth/google/login', {'next': 'https://evil.example'})
+        self.assertEqual(dropped.status_code, 302)
+        self.assertNotIn('oauth_next', self.client.session)
+
+    @override_settings(FRONTEND_URL='http://localhost:5173/')
+    def test_callback_returns_to_stored_path(self):
+        session = self.client.session
+        session['oauth_state'] = 'state-1'
+        session['oauth_next'] = '/transactions?q=rent'
+        self._save_session(session)
+
+        with (
+            patch(
+                'finance.oauth.exchange_code',
+                return_value={'access_token': 'tok', 'expires_in': 3600},
+            ),
+            patch('finance.oauth.fetch_email', return_value='callback@example.com'),
+        ):
+            response = self.client.get(
+                '/api/auth/google/callback',
+                {'code': 'auth-code', 'state': 'state-1'},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response['Location'],
+            'http://localhost:5173/transactions?q=rent',
+        )
+        self.assertNotIn('oauth_next', self.client.session)
+
+    @override_settings(FRONTEND_URL='http://localhost:5173')
+    def test_callback_error_goes_to_login_and_keeps_next(self):
+        session = self.client.session
+        session['oauth_state'] = 'state-1'
+        session['oauth_next'] = '/sources'
+        self._save_session(session)
+
+        response = self.client.get('/api/auth/google/callback', {'state': 'state-1'})
+
+        self.assertEqual(response.status_code, 302)
+        parsed = urlparse(response['Location'])
+        self.assertEqual(parsed.scheme, 'http')
+        self.assertEqual(parsed.netloc, 'localhost:5173')
+        self.assertEqual(parsed.path, '/login')
+        query = parse_qs(parsed.query)
+        self.assertEqual(query['auth_error'], ['missing_code'])
+        self.assertEqual(query['next'], ['/sources'])
+
+    @override_settings(FRONTEND_URL='http://localhost:5173')
+    def test_callback_ignores_external_return_path(self):
+        session = self.client.session
+        session['oauth_state'] = 'state-1'
+        session['oauth_next'] = '//evil.example/phish'
+        self._save_session(session)
+
+        with (
+            patch(
+                'finance.oauth.exchange_code',
+                return_value={'access_token': 'tok', 'expires_in': 3600},
+            ),
+            patch('finance.oauth.fetch_email', return_value='callback@example.com'),
+        ):
+            response = self.client.get(
+                '/api/auth/google/callback',
+                {'code': 'auth-code', 'state': 'state-1'},
+            )
+
+        self.assertEqual(response['Location'], 'http://localhost:5173/')

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import posixpath
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlsplit
 
 import requests
 from django.conf import settings
@@ -115,13 +116,53 @@ def store_finance_user(request: HttpRequest, user_id: str) -> None:
     request.session.modified = True
 
 
-def clear_tokens(request: HttpRequest) -> None:
+def safe_frontend_path(value: str | None) -> str | None:
+    """Relative SPA path safe to use as a post-login return target.
+
+    Rejects protocol-relative URLs, other origins, and the login route so a
+    `next` value cannot bounce the browser off-site or loop on /login.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > 512:
+        return None
+    if any(ch.isspace() or ch in '\\' for ch in candidate):
+        return None
+    if not candidate.startswith('/') or candidate.startswith('//'):
+        return None
+
+    parts = urlsplit(candidate)
+    if parts.scheme or parts.netloc:
+        return None
+    path = unquote(parts.path or '')
+    if not path.startswith('/') or path.startswith('//') or '\\' in path:
+        return None
+    normalized = posixpath.normpath(path)
+    if not normalized.startswith('/') or normalized.startswith('//'):
+        return None
+    if normalized == '/login' or normalized.startswith('/login/'):
+        return None
+    if normalized == '/api' or normalized.startswith('/api/'):
+        return None
+    return candidate
+
+
+def clear_session(request: HttpRequest, *, revoke: bool = False) -> None:
+    """Drop Google tokens from the session.
+
+    Revocation calls Google and is reserved for an explicit logout. Auth
+    failures only clear the cookie so a dead refresh token cannot keep
+    `/api/auth/me` reporting the user as signed in, and tests do not hit
+    the network.
+    """
     access = request.session.get(SESSION_ACCESS)
-    if access:
+    if revoke and access:
         try:
             requests.post(GOOGLE_REVOKE_URL, params={'token': access}, timeout=10)
         except Exception:
             pass
+    removed = False
     for key in (
         SESSION_ACCESS,
         SESSION_REFRESH,
@@ -129,8 +170,14 @@ def clear_tokens(request: HttpRequest) -> None:
         SESSION_EMAIL,
         SESSION_USER_ID,
     ):
-        request.session.pop(key, None)
-    request.session.modified = True
+        if request.session.pop(key, None) is not None:
+            removed = True
+    if removed:
+        request.session.modified = True
+
+
+def clear_tokens(request: HttpRequest) -> None:
+    clear_session(request, revoke=True)
 
 
 def is_authenticated(request: HttpRequest) -> bool:

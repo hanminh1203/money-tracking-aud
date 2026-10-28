@@ -1,5 +1,7 @@
 /** Thin client for the Django /api backend (cookie session + CSRF). */
 
+import { handleUnauthorizedResponse, isSafeReturnPath } from './authRedirect.js';
+
 function getCookie(name) {
   const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
   return match ? decodeURIComponent(match[1]) : null;
@@ -35,20 +37,39 @@ async function api(path, { method = 'GET', body, headers, signal } = {}) {
   }
 
   if (!res.ok) {
-    const msg = data?.error || `${res.status} ${res.statusText}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
+    throw buildApiError(path, res, data);
   }
   return data;
+}
+
+function buildApiError(path, res, data) {
+  notifyExpiredSession(path, res.status, data?.code);
+  const msg = data?.error || `${res.status} ${res.statusText}`;
+  const err = new Error(msg);
+  err.status = res.status;
+  err.code = data?.code;
+  return err;
+}
+
+function notifyExpiredSession(path, status, code) {
+  if (typeof window === 'undefined') return;
+  handleUnauthorizedResponse({
+    status,
+    code,
+    apiPath: path,
+    pathname: window.location.pathname,
+    search: window.location.search,
+  });
 }
 
 export function fetchMe() {
   return api('/auth/me');
 }
 
-export function loginUrl() {
-  return '/api/auth/google/login';
+export function loginUrl(next) {
+  const base = '/api/auth/google/login';
+  if (!isSafeReturnPath(next)) return base;
+  return `${base}?next=${encodeURIComponent(next)}`;
 }
 
 export function logout() {
@@ -193,10 +214,7 @@ export async function fetchHealth() {
   }
 
   if (!res.ok && res.status !== 503) {
-    const msg = data?.error || `${res.status} ${res.statusText}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
+    throw buildApiError('/management/health', res, data);
   }
   return data;
 }
