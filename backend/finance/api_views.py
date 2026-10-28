@@ -71,6 +71,36 @@ def parse_json(request: HttpRequest) -> dict:
     return data
 
 
+def unauthenticated_response(request: HttpRequest, exc: oauth.AuthError) -> JsonResponse:
+    """401 for a missing, expired, or rejected session.
+
+    Stale Google tokens are removed so the next `/api/auth/me` does not still
+    report the user as signed in. Non-401 auth failures (misconfigured OAuth)
+    keep their status and do not clear a session.
+    """
+    if exc.status == 401:
+        oauth.clear_session(request)
+        return JsonResponse(
+            {'error': str(exc), 'code': 'unauthenticated'},
+            status=401,
+        )
+    return json_error(str(exc), status=exc.status)
+
+
+def _frontend_redirect(request: HttpRequest, *, error: str | None = None) -> HttpResponse:
+    """Send the browser back to the SPA after the Google redirect."""
+    nxt = oauth.safe_frontend_path(request.session.pop('oauth_next', None))
+    base = settings.FRONTEND_URL.rstrip('/')
+    if error:
+        params: dict[str, str] = {'auth_error': error}
+        if nxt:
+            params['next'] = nxt
+        location = f'{base}/login?{urlencode(params)}'
+    else:
+        location = f'{base}{nxt or "/"}'
+    return HttpResponse(status=302, headers={'Location': location})
+
+
 def require_auth(view: Callable):
     @wraps(view)
     def wrapper(request: HttpRequest, *args, **kwargs):
@@ -78,7 +108,7 @@ def require_auth(view: Callable):
             token = oauth.get_access_token(request)
             user = oauth.get_finance_user(request)
         except oauth.AuthError as exc:
-            return json_error(str(exc), status=exc.status)
+            return unauthenticated_response(request, exc)
         request.google_access_token = token  # type: ignore[attr-defined]
         request.finance_user = user  # type: ignore[attr-defined]
         return view(request, *args, **kwargs)
@@ -98,29 +128,41 @@ def sheets_for(request: HttpRequest) -> SheetsClient:
 @ensure_csrf_cookie
 @require_GET
 def auth_me(request: HttpRequest) -> JsonResponse:
-    # Touch CSRF cookie for the SPA
+    # Touch CSRF cookie for the SPA. Anonymous visitors stay 200 so the login
+    # page can check the session without looking like an expired-token error.
     get_token(request)
-    authenticated = oauth.is_authenticated(request)
-    email = None
-    sheet_id = None
-    if authenticated:
-        email = request.session.get(oauth.SESSION_EMAIL)
-        try:
-            user = oauth.get_finance_user(request)
-            sheet_id = user.sheet_id or None
-        except oauth.AuthError:
-            pass
+    if not oauth.is_authenticated(request):
+        return JsonResponse(
+            {
+                'authenticated': False,
+                'email': None,
+                'sheetId': None,
+                'expiresAt': None,
+            }
+        )
+    try:
+        oauth.get_access_token(request)
+        user = oauth.get_finance_user(request)
+    except oauth.AuthError as exc:
+        return unauthenticated_response(request, exc)
+    expires_at = int(request.session.get(oauth.SESSION_EXPIRES) or 0) or None
     return JsonResponse(
         {
-            'authenticated': authenticated,
-            'email': email,
-            'sheetId': sheet_id,
+            'authenticated': True,
+            'email': request.session.get(oauth.SESSION_EMAIL),
+            'sheetId': user.sheet_id or None,
+            'expiresAt': expires_at,
         }
     )
 
 
 @require_GET
 def google_login(request: HttpRequest) -> HttpResponse:
+    nxt = oauth.safe_frontend_path(request.GET.get('next'))
+    if nxt:
+        request.session['oauth_next'] = nxt
+    else:
+        request.session.pop('oauth_next', None)
     try:
         state = secrets.token_urlsafe(24)
         request.session['oauth_state'] = state
@@ -135,28 +177,16 @@ def google_login(request: HttpRequest) -> HttpResponse:
 def google_callback(request: HttpRequest) -> HttpResponse:
     error = request.GET.get('error')
     if error:
-        qs = urlencode({'auth_error': error})
-        return HttpResponse(
-            status=302,
-            headers={'Location': f'{settings.FRONTEND_URL}/?{qs}'},
-        )
+        return _frontend_redirect(request, error=error)
 
     state = request.GET.get('state')
     expected = request.session.pop('oauth_state', None)
     if not state or not expected or state != expected:
-        qs = urlencode({'auth_error': 'invalid_state'})
-        return HttpResponse(
-            status=302,
-            headers={'Location': f'{settings.FRONTEND_URL}/?{qs}'},
-        )
+        return _frontend_redirect(request, error='invalid_state')
 
     code = request.GET.get('code')
     if not code:
-        qs = urlencode({'auth_error': 'missing_code'})
-        return HttpResponse(
-            status=302,
-            headers={'Location': f'{settings.FRONTEND_URL}/?{qs}'},
-        )
+        return _frontend_redirect(request, error='missing_code')
 
     try:
         token_data = oauth.exchange_code(code)
@@ -167,13 +197,9 @@ def google_callback(request: HttpRequest) -> HttpResponse:
         oauth.store_tokens(request, token_data, email=email)
         oauth.store_finance_user(request, str(user.id))
     except oauth.AuthError as exc:
-        qs = urlencode({'auth_error': str(exc)})
-        return HttpResponse(
-            status=302,
-            headers={'Location': f'{settings.FRONTEND_URL}/?{qs}'},
-        )
+        return _frontend_redirect(request, error=str(exc))
 
-    return HttpResponse(status=302, headers={'Location': f'{settings.FRONTEND_URL}/'})
+    return _frontend_redirect(request)
 
 
 @require_POST

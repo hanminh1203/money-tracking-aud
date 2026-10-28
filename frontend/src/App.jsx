@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { isLoginPath, isSafeReturnPath, loginLocation } from './lib/authRedirect';
 import NavBar from './components/NavBar';
 import SignInScreen from './components/SignInScreen';
 import Dashboard from './pages/Dashboard';
@@ -17,8 +18,37 @@ import { currentBalances } from './lib/transform';
 import ChatBot from './components/ChatBot';
 
 export default function App() {
-  const { signedIn, ready, error: authError, signIn, signOut } = useAuth();
-  const { transactions, metadata, dashboard, error, refresh, listVersion } = useFinanceData(signedIn);
+  const auth = useAuth();
+  const location = useLocation();
+
+  if (!auth.ready) {
+    return <SignInScreen onSignIn={auth.signIn} error={auth.error} ready={false} />;
+  }
+
+  if (isLoginPath(location.pathname)) {
+    return <LoginRoute auth={auth} />;
+  }
+
+  if (!auth.signedIn) {
+    return (
+      <Navigate to={loginLocation(`${location.pathname}${location.search}`)} replace />
+    );
+  }
+
+  return <AuthenticatedApp onSignOut={auth.signOut} />;
+}
+
+function LoginRoute({ auth }) {
+  const location = useLocation();
+  if (auth.signedIn) {
+    const next = new URLSearchParams(location.search).get('next');
+    return <Navigate to={isSafeReturnPath(next) ? next : '/'} replace />;
+  }
+  return <SignInScreen onSignIn={auth.signIn} error={auth.error} ready={auth.ready} />;
+}
+
+function AuthenticatedApp({ onSignOut }) {
+  const { transactions, metadata, dashboard, error, refresh, listVersion } = useFinanceData(true);
   const { pathname } = useLocation();
   const balances = useMemo(() => currentBalances(transactions), [transactions]);
   const isTransactionDetail = /^\/transactions\/[^/]+$/.test(pathname);
@@ -30,16 +60,11 @@ export default function App() {
     isProductDetail;
 
   useEffect(() => {
-    if (!signedIn) return;
     if (pathname === '/health' || pathname === '/management') return;
     if (isTransactionDetail) return;
     if (isProductDetail) return;
     refresh();
-  }, [pathname, refresh, signedIn, isTransactionDetail, isProductDetail]);
-
-  if (!signedIn) {
-    return <SignInScreen onSignIn={signIn} error={authError} ready={ready} />;
-  }
+  }, [pathname, refresh, isTransactionDetail, isProductDetail]);
 
   return (
     <div className="h-dvh flex flex-col md:flex-row overflow-hidden">
@@ -49,7 +74,7 @@ export default function App() {
       >
         Skip to content
       </a>
-      <NavBar onSignOut={signOut} />
+      <NavBar onSignOut={onSignOut} />
 
       <main id="main-content" className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
         {error && (

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test src/lib/transform.test.js"
+    "test": "node --test src/lib/transform.test.js src/lib/authRedirect.test.js"
   },
   "dependencies": {
     "heic2any": "^0.0.4",

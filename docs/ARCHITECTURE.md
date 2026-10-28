@@ -39,13 +39,18 @@ Vercel project (Services)  —  or locally Vite :5173 proxying /api
   - `models.py` — UUID `id` + `version` on finance tables; `User` with per-user `sheet_id`.
 
 Auth flow: Google login → callback → session cookie → `@require_auth` on protected views. SPA loads `GET /api/auth/me`
-for user info and CSRF token setup.
+for user info, access-token `expiresAt`, and CSRF token setup. Anonymous `auth/me` stays HTTP 200 with
+`authenticated: false`. A session that still holds a Google token but cannot refresh it (expired access token
+and missing or rejected refresh token) returns **401** `{"code": "unauthenticated"}` and the tokens are cleared.
+The SPA treats that code as a dead session: one redirect to `/login` (concurrent 401s collapse), then Google
+sign-in. `next` is a relative path only; the callback returns the browser there. `/login` and
+`/api/auth/google/callback` do not redirect again.
 
 ## Frontend
 
-- Vite SPA with react-router: Dashboard, Sources, Transactions, Giftcards, Products, Chat (assistant), Health, Management.
-- Unauthenticated users see `SignInScreen` (Google sign-in).
-- `lib/api.js` — fetch wrapper, CSRF header, JSON errors.
+- Vite SPA with react-router: Dashboard, Sources, Transactions, Giftcards, Products, Chat (assistant), Health, Management, Login (`/login`).
+- Unauthenticated users are sent to `/login` (`SignInScreen`, Google sign-in). A safe `next` path is restored after OAuth.
+- `lib/api.js` — fetch wrapper, CSRF header, JSON errors, single expired-session redirect (`lib/authRedirect.js`).
 - `hooks/useAuth.js`, `hooks/useFinanceData.js` — session and data loading.
 - Design: Quiet Ledger (see [`design-system/finance-dashboard/MASTER.md`](../design-system/finance-dashboard/MASTER.md)).
 
