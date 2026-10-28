@@ -2117,10 +2117,11 @@ class GiftcardDebitWriteTests(TestCase):
         self.assertEqual(planned[0]['new_balance'], 25.0)
 
     @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_rows', return_value=[9])
     @patch.object(SheetsClient, 'append_funding_rows')
     @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
     def test_add_transaction_applies_giftcard_debit(
-        self, _append_tx, append_funding, apply_debits
+        self, _append_tx, append_funding, _append_rows, apply_debits
     ):
         from finance import db_writer
 
@@ -2479,8 +2480,18 @@ class GiftcardDebitWriteTests(TestCase):
                 sub_category='Groceries',
             )
 
-        self.assertEqual(append_rows.call_args.args[2][0][1], '2026-09-19')
+        tx_rows = [
+            call.args[2][0]
+            for call in append_rows.call_args_list
+            if call.args[0] == settings.TRANSACTIONS_TABLE
+        ]
+        self.assertEqual(tx_rows[0][1], '2026-09-19')
         self.assertEqual(save_use.call_args.kwargs['date'], '2026-09-19')
+        receipt = save_use.call_args.kwargs['receipt']
+        self.assertEqual(receipt['items'][0]['name'], 'Milk')
+        self.assertEqual(receipt['items'][0]['unit'], 'piece')
+        self.assertEqual(receipt['items'][0]['amount'], Decimal('1'))
+        self.assertEqual(receipt['total'], Decimal('10.00'))
 
 
 PERTH_AFTER_UTC_MIDNIGHT = datetime(2026, 9, 18, 20, 0, tzinfo=dt_timezone.utc)
@@ -2761,10 +2772,11 @@ class DualWriteCreateFailureTests(TestCase):
     @patch('finance.api_views.oauth.get_finance_user')
     @patch('finance.api_views.oauth.get_access_token', return_value='token')
     @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_rows', return_value=[9])
     @patch.object(SheetsClient, 'append_funding_rows')
     @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
     def test_create_transaction_api_postgres_failure_is_not_success(
-        self, _append_tx, append_funding, _apply, _token, get_user
+        self, _append_tx, append_funding, _append_rows, _apply, _token, get_user
     ):
         get_user.return_value = self.user
         append_funding.return_value = (
@@ -2789,6 +2801,7 @@ class DualWriteCreateFailureTests(TestCase):
                     'type': 'Expense',
                     'source': 'Everyday',
                     'subCategory': 'Groceries',
+                    'comment': 'Groceries',
                 },
                 content_type='application/json',
             )
@@ -3514,3 +3527,712 @@ class SessionExpiryTests(TestCase):
             )
 
         self.assertEqual(response['Location'], 'http://localhost:5173/')
+
+
+class MemorySheet:
+    """Sheet stand-in for receipt backfill. Records appends and serves them back."""
+
+    def __init__(self):
+        self.transactions = []
+        self.receipts = []
+        self.items = []
+        self.appends = 0
+
+    def get_mirror_source_rows(self):
+        return {
+            'transactions': self.transactions,
+            'receipts': self.receipts,
+            'receipt_items': self.items,
+        }
+
+    def update_table_cell_at_row(self, table_name, *, sheet_row, update_column, new_value):
+        for row in self.transactions:
+            if row.get('__sheet_row') == sheet_row and update_column == 'Comment':
+                row['Comment'] = new_value
+
+    def append_rows(self, table_name, column_names, rows):
+        self.appends += 1
+        if table_name == settings.RECEIPT_TABLE:
+            for values in rows:
+                self.receipts.append(
+                    {
+                        'Receipt ID': values[0],
+                        'Transaction ID': values[1],
+                        'Date': values[2],
+                        'Total': values[3],
+                    }
+                )
+        elif table_name == settings.RECEIPT_ITEMS_TABLE:
+            for values in rows:
+                self.items.append(
+                    {
+                        'Receipt Item ID': values[0],
+                        'Receipt ID': values[1],
+                        'Name': values[2],
+                        'Amount': values[3],
+                        'Unit': values[4],
+                        'Money': values[5],
+                    }
+                )
+        return [1]
+
+
+class AutoReceiptWriteTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='auto-receipt@example.com', sheet_id='sheet-auto')
+        self.other = User.objects.create(email='auto-other@example.com', sheet_id='sheet-other')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.salary = Category.objects.create(
+            user=self.user,
+            main_category='Earnings',
+            sub_category='Salary',
+            type='Income',
+        )
+        self.exchange = Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        self.sheet = MemorySheet()
+
+    def _client(self):
+        return SheetsClient(access_token='token', sheet_id='sheet-auto', user=self.user)
+
+    def _funding(self, amount, row=3):
+        return (
+            [
+                {
+                    'payment_id': str(uuid.uuid4()),
+                    'source': 'Everyday',
+                    'amount': amount,
+                    'row_number': row,
+                }
+            ],
+            [],
+        )
+
+    def _add_auto(self, *, row, change, comment, category):
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=date(2026, 1, 8),
+            change=Decimal(change),
+            category=category,
+            comment=comment,
+        )
+        Payment.objects.create(
+            user=self.user,
+            transaction=tx,
+            source=self.source,
+            amount=abs(Decimal(change)),
+            row_number=row,
+        )
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=tx,
+            date=tx.date,
+            total=abs(Decimal(change)),
+        )
+        item = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name=comment,
+            amount=Decimal('1'),
+            unit='piece',
+            money=abs(Decimal(change)),
+        )
+        return tx, receipt, item
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_rows', return_value=[8])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
+    def test_create_requires_description_before_any_sheet_write(
+        self, append_tx, _funding, _rows, _debits
+    ):
+        with self.assertRaises(SheetsError) as ctx:
+            self._client().add_transaction(
+                date='2026-01-15',
+                amount=10,
+                type='Expense',
+                sub_category='Groceries',
+                comment='   ',
+                payments=[{'source': 'Everyday', 'amount': 10}],
+            )
+        self.assertIn('Description is required', str(ctx.exception))
+        append_tx.assert_not_called()
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_rows', return_value=[8])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
+    def test_create_expense_writes_one_receipt_line_and_counts_spend_once(
+        self, _append_tx, append_funding, append_rows, _debits, _today
+    ):
+        from finance.db_writer import delete_transaction_detail
+
+        append_funding.return_value = self._funding(10)
+        result = self._client().add_transaction(
+            date='2026-01-15',
+            amount=10,
+            type='Expense',
+            sub_category='Groceries',
+            comment='Milk',
+            payments=[{'source': 'Everyday', 'amount': 10}],
+        )
+        tx = Transaction.objects.get(user=self.user)
+        item = ReceiptItem.objects.get(user=self.user)
+        self.assertEqual(result['receiptId'], str(tx.receipt.id))
+        self.assertEqual(tx.change, Decimal('-10'))
+        self.assertEqual(tx.comment, 'Milk')
+        self.assertEqual(tx.receipt.total, Decimal('10.00'))
+        self.assertEqual(item.name, 'Milk')
+        self.assertEqual(item.amount, Decimal('1'))
+        self.assertEqual(item.unit, 'piece')
+        self.assertEqual(item.money, Decimal('10.00'))
+        receipt_tables = [call.args[0] for call in append_rows.call_args_list]
+        self.assertEqual(
+            receipt_tables,
+            [settings.RECEIPT_TABLE, settings.RECEIPT_ITEMS_TABLE],
+        )
+        dashboard = get_dashboard_data(user=self.user)
+        self.assertEqual(dashboard['summary']['expense'], -10.0)
+        self.assertEqual(dashboard['summary']['income'], 0.0)
+
+        delete_transaction_detail(user=self.user, transaction=tx)
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(ReceiptItem.objects.filter(user=self.user).count(), 0)
+        after = get_dashboard_data(user=self.user)
+        self.assertEqual(after['summary']['expense'], 0.0)
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_rows', return_value=[8])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=6)
+    def test_create_income_receipt_does_not_count_as_expense(
+        self, _append_tx, append_funding, _rows, _debits, _today
+    ):
+        append_funding.return_value = self._funding(20)
+        self._client().add_transaction(
+            date='2026-01-15',
+            amount=20,
+            type='Income',
+            sub_category='Salary',
+            comment='Pay',
+            payments=[{'source': 'Everyday', 'amount': 20}],
+        )
+        tx = Transaction.objects.get(user=self.user)
+        self.assertEqual(tx.change, Decimal('20'))
+        self.assertEqual(tx.receipt.total, Decimal('20.00'))
+        dashboard = get_dashboard_data(user=self.user)
+        self.assertEqual(dashboard['summary']['income'], 20.0)
+        self.assertEqual(dashboard['summary']['expense'], 0.0)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_rows', return_value=[8])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=7)
+    def test_exchange_category_transaction_has_no_receipt(
+        self, _append_tx, append_funding, append_rows, _debits
+    ):
+        append_funding.return_value = self._funding(15)
+        result = self._client().add_transaction(
+            date='2026-01-15',
+            amount=15,
+            type='Expense',
+            sub_category='Exchange (self)',
+            comment='Move cash',
+            payments=[{'source': 'Everyday', 'amount': 15}],
+        )
+        self.assertIsNone(result['receiptId'])
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+        append_rows.assert_not_called()
+
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', side_effect=[5, 6])
+    def test_transfer_blank_comment_is_exchange_and_has_no_receipt(
+        self, _append_tx, append_funding
+    ):
+        savings = Source.objects.create(user=self.user, name='Savings', type='Bank')
+        append_funding.side_effect = [self._funding(40, row=11), self._funding(40, row=12)]
+        self._client().add_transfer(
+            date='2026-01-15',
+            amount=40,
+            from_source='Everyday',
+            to_source='Savings',
+            comment='  ',
+        )
+        notes = set(Transaction.objects.filter(user=self.user).values_list('comment', flat=True))
+        self.assertEqual(notes, {'Exchange'})
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(
+            list(
+                Transaction.objects.filter(user=self.user).values_list(
+                    'category__sub_category', flat=True
+                )
+            ),
+            ['Exchange (self)', 'Exchange (self)'],
+        )
+        self.assertTrue(savings.id)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, 'append_rows', return_value=[8])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'append_transaction_row', return_value=5)
+    def test_postgres_receipt_failure_rolls_back_the_transaction(
+        self, _append_tx, append_funding, _rows, _debits
+    ):
+        append_funding.return_value = self._funding(10)
+        with patch.object(Receipt.objects, 'create', side_effect=RuntimeError('postgres down')):
+            with self.assertRaises(DualWriteError):
+                self._client().add_transaction(
+                    date='2026-01-15',
+                    amount=10,
+                    type='Expense',
+                    sub_category='Groceries',
+                    comment='Milk',
+                    payments=[{'source': 'Everyday', 'amount': 10}],
+                )
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, '_sync_receipt_item_sheet_rows')
+    @patch.object(SheetsClient, 'find_matching_sheet_rows', return_value=[4])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'delete_funding_rows_for_transaction')
+    @patch.object(SheetsClient, 'update_table_row_at')
+    def test_edit_syncs_auto_receipt_and_keeps_income_sign(
+        self, _update_row, _delete_funding, append_funding, _find, _sync_items, _debits
+    ):
+        tx, receipt, item = self._add_auto(
+            row=1, change='20.00', comment='Pay', category=self.salary
+        )
+        product = Product.objects.create(user=self.user, name='Pay packet')
+        link = ProductItem.objects.create(
+            user=self.user,
+            product=product,
+            receipt_item=item,
+        )
+        append_funding.return_value = self._funding(25)
+        self._client().update_transaction(
+            str(tx.id),
+            date='2026-01-20',
+            amount=25,
+            type='Income',
+            sub_category='Salary',
+            comment='Bonus',
+            payments=[{'source': 'Everyday', 'amount': 25}],
+        )
+        tx.refresh_from_db()
+        receipt.refresh_from_db()
+        item.refresh_from_db()
+        link.refresh_from_db()
+        self.assertEqual(tx.change, Decimal('25'))
+        self.assertGreater(tx.change, 0)
+        self.assertEqual(tx.comment, 'Bonus')
+        self.assertEqual(receipt.total, Decimal('25'))
+        self.assertEqual(item.name, 'Bonus')
+        self.assertEqual(item.unit, 'piece')
+        self.assertEqual(item.money, Decimal('25'))
+        self.assertEqual(link.receipt_item_id, item.id)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, '_sync_receipt_item_sheet_rows')
+    @patch.object(SheetsClient, 'find_matching_sheet_rows', return_value=[4])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'delete_funding_rows_for_transaction')
+    @patch.object(SheetsClient, 'update_table_row_at')
+    def test_edit_does_not_rename_a_user_edited_receipt(
+        self, _update_row, _delete_funding, append_funding, _find, _sync_items, _debits
+    ):
+        tx, _receipt, item = self._add_auto(
+            row=2, change='-10.00', comment='Shop', category=self.groceries
+        )
+        item.name = 'Milk'
+        item.unit = 'L'
+        item.amount = Decimal('2')
+        item.save(update_fields=['name', 'unit', 'amount'])
+        append_funding.return_value = self._funding(10)
+        self._client().update_transaction(
+            str(tx.id),
+            date='2026-01-08',
+            amount=10,
+            type='Expense',
+            sub_category='Groceries',
+            comment='Renamed shop',
+            payments=[{'source': 'Everyday', 'amount': 10}],
+            items=[
+                {
+                    'id': str(item.id),
+                    'name': 'Milk',
+                    'amount': 2,
+                    'unit': 'L',
+                    'money': 10,
+                }
+            ],
+        )
+        tx.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(tx.comment, 'Renamed shop')
+        self.assertEqual(item.name, 'Milk')
+        self.assertEqual(item.unit, 'L')
+
+    @patch.object(SheetsClient, 'update_table_row_at')
+    def test_edit_requires_description(self, update_row):
+        tx, _receipt, _item = self._add_auto(
+            row=3, change='-4.00', comment='Milk', category=self.groceries
+        )
+        with self.assertRaises(SheetsError) as ctx:
+            self._client().update_transaction(
+                str(tx.id),
+                date='2026-01-08',
+                amount=4,
+                type='Expense',
+                sub_category='Groceries',
+                comment=' ',
+            )
+        self.assertIn('Description is required', str(ctx.exception))
+        update_row.assert_not_called()
+        tx.refresh_from_db()
+        self.assertEqual(tx.comment, 'Milk')
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    def test_create_api_requires_description(self, _token, get_user):
+        get_user.return_value = self.user
+        response = self.client.post(
+            '/api/transactions',
+            data={
+                'date': '2026-01-15',
+                'amount': 10,
+                'type': 'Expense',
+                'subCategory': 'Groceries',
+                'payments': [{'source': 'Everyday', 'amount': 10}],
+            },
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['error'], 'Description is required.')
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    @patch('finance.sheets_client.timezone.localdate', return_value=date(2026, 1, 15))
+    @patch.object(SheetsClient, 'update_table_cell_at_row')
+    @patch.object(SheetsClient, 'append_rows', return_value=[9])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    def test_use_giftcard_creates_one_receipt_and_counts_spend_once(
+        self, append_funding, _rows, _balance, _sheet_today, _dash_today
+    ):
+        card = Giftcard.objects.create(
+            user=self.user,
+            row_number=4,
+            shop='Coles',
+            date=date(2026, 1, 1),
+            balance=Decimal('30.00'),
+        )
+        append_funding.return_value = (
+            [],
+            [
+                {
+                    'giftcard_payment_id': str(uuid.uuid4()),
+                    'giftcard_id': str(card.id),
+                    'amount': 12.5,
+                    'row_number': 1,
+                }
+            ],
+        )
+        result = self._client().use_giftcard(
+            giftcard_id=str(card.id),
+            amount=12.5,
+            comment='',
+            sub_category='Groceries',
+        )
+        tx = Transaction.objects.get(user=self.user)
+        self.assertEqual(tx.comment, 'Use giftcard: Coles')
+        self.assertEqual(tx.change, Decimal('-12.5'))
+        self.assertEqual(result['receiptId'], str(tx.receipt.id))
+        self.assertEqual(tx.receipt.items.get().name, 'Use giftcard: Coles')
+        self.assertEqual(tx.receipt.items.get().money, Decimal('12.50'))
+        card.refresh_from_db()
+        self.assertEqual(card.balance, Decimal('17.50'))
+        dashboard = get_dashboard_data(user=self.user)
+        self.assertEqual(dashboard['summary']['expense'], -12.5)
+        self.assertEqual(dashboard['summary']['income'], 0.0)
+
+
+class ReceiptBackfillTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='backfill@example.com', sheet_id='sheet-bf')
+        self.other = User.objects.create(email='backfill-other@example.com', sheet_id='sheet-bf-2')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Groceries',
+            type='Expense',
+        )
+        self.exchange = Category.objects.create(
+            user=self.user,
+            main_category='Transfer',
+            sub_category='Exchange (self)',
+            type='',
+        )
+        self.sheet = MemorySheet()
+
+    def make_tx(self, *, row, change, comment='', category=None, on_sheet=True, sub=None):
+        category = category if category is not None else self.groceries
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=date(2026, 1, 8),
+            change=Decimal(change),
+            category=category,
+            comment=comment,
+        )
+        if Decimal(change) != 0:
+            Payment.objects.create(
+                user=self.user,
+                transaction=tx,
+                source=self.source,
+                amount=abs(Decimal(change)),
+                row_number=row,
+            )
+        if on_sheet:
+            self.sheet.transactions.append(
+                {
+                    'Transaction ID': str(tx.id),
+                    'Date': tx.date.isoformat(),
+                    'Change': float(tx.change),
+                    'Comment': comment,
+                    'Sub category': sub if sub is not None else category.sub_category,
+                    '__sheet_row': row,
+                }
+            )
+        return tx
+
+    def run_backfill(self, *, dry_run=False, user=None):
+        from finance.receipt_backfill import backfill_missing_receipts
+
+        return backfill_missing_receipts(
+            user=user or self.user,
+            client=self.sheet,
+            dry_run=dry_run,
+        )
+
+    def test_dry_run_counts_without_writing(self):
+        self.make_tx(row=1, change='-8.50', comment='Milk')
+        summary = self.run_backfill(dry_run=True)
+        self.assertEqual(summary['created'], 1)
+        self.assertTrue(summary['dry_run'])
+        self.assertEqual(self.sheet.appends, 0)
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+
+    def test_creates_line_then_skips_on_rerun(self):
+        tx = self.make_tx(row=2, change='-8.50', comment='Milk')
+        first = self.run_backfill()
+        self.assertEqual(first['created'], 1)
+        item = ReceiptItem.objects.get(receipt__transaction=tx)
+        self.assertEqual(item.name, 'Milk')
+        self.assertEqual(item.amount, Decimal('1'))
+        self.assertEqual(item.unit, 'piece')
+        self.assertEqual(item.money, Decimal('8.50'))
+        self.assertEqual(item.receipt.total, Decimal('8.50'))
+        second = self.run_backfill()
+        self.assertEqual(second['created'], 0)
+        self.assertEqual(second['skipped_has_receipt'], 1)
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 1)
+        self.assertEqual(self.sheet.appends, 2)
+
+    def test_blank_sheet_comment_is_filled_from_postgres(self):
+        tx = self.make_tx(row=13, change='-3.00', comment='From db')
+        self.sheet.transactions[-1]['Comment'] = ''
+        summary = self.run_backfill()
+        self.assertEqual(summary['placeholders'], 0)
+        self.assertEqual(summary['created'], 1)
+        tx.refresh_from_db()
+        self.assertEqual(tx.comment, 'From db')
+        self.assertEqual(tx.receipt.items.get().name, 'From db')
+        self.assertEqual(self.sheet.transactions[-1]['Comment'], 'From db')
+
+    def test_blank_description_uses_placeholder_on_sheet_and_postgres(self):
+        from finance.auto_receipt import MISSING_DESCRIPTION
+
+        tx = self.make_tx(row=3, change='-3.00', comment='')
+        summary = self.run_backfill()
+        self.assertEqual(summary['placeholders'], 1)
+        tx.refresh_from_db()
+        self.assertEqual(tx.comment, MISSING_DESCRIPTION)
+        self.assertEqual(tx.receipt.items.get().name, MISSING_DESCRIPTION)
+        self.assertEqual(self.sheet.transactions[0]['Comment'], MISSING_DESCRIPTION)
+
+    def test_repairs_postgres_from_existing_sheet_receipt_without_appending(self):
+        tx = self.make_tx(row=4, change='-6.00', comment='Bread')
+        receipt_id = str(uuid.uuid4())
+        item_id = str(uuid.uuid4())
+        self.sheet.receipts.append(
+            {
+                'Receipt ID': receipt_id,
+                'Transaction ID': str(tx.id),
+                'Date': '2026-01-08',
+                'Total': 6,
+            }
+        )
+        self.sheet.items.append(
+            {
+                'Receipt Item ID': item_id,
+                'Receipt ID': receipt_id,
+                'Name': 'Bread',
+                'Amount': 1,
+                'Unit': 'piece',
+                'Money': 6,
+            }
+        )
+        summary = self.run_backfill()
+        self.assertEqual(summary['created'], 0)
+        self.assertEqual(summary['repaired_from_sheet'], 1)
+        self.assertEqual(self.sheet.appends, 0)
+        self.assertEqual(str(Receipt.objects.get(user=self.user).id), receipt_id)
+        self.assertEqual(str(ReceiptItem.objects.get(user=self.user).id), item_id)
+
+    def test_failed_postgres_write_is_repaired_on_rerun(self):
+        from finance.db_writer import DualWriteError
+        from finance.receipt_backfill import BackfillWriteError
+
+        tx = self.make_tx(row=5, change='-4.00', comment='Eggs')
+        with patch(
+            'finance.receipt_backfill.save_receipt_for_existing_transaction',
+            side_effect=DualWriteError(),
+        ):
+            with self.assertRaises(BackfillWriteError):
+                self.run_backfill()
+        self.assertFalse(Receipt.objects.filter(transaction=tx).exists())
+        self.assertEqual(self.sheet.appends, 2)
+        summary = self.run_backfill()
+        self.assertEqual(summary['repaired_from_sheet'], 1)
+        self.assertEqual(summary['created'], 0)
+        self.assertTrue(Receipt.objects.filter(transaction=tx).exists())
+        self.assertEqual(self.sheet.appends, 2)
+
+    def test_skips_exchange_zero_missing_sheet_and_other_user(self):
+        self.make_tx(row=6, change='-20.00', comment='Move', category=self.exchange)
+        self.make_tx(row=7, change='0', comment='Zero')
+        self.make_tx(row=8, change='-2.00', comment='Only db', on_sheet=False)
+        other_tx = Transaction.objects.create(
+            user=self.other,
+            row_number=1,
+            date=date(2026, 1, 8),
+            change=Decimal('-9.00'),
+            comment='Other',
+        )
+        summary = self.run_backfill()
+        self.assertEqual(summary['created'], 0)
+        self.assertEqual(summary['skipped_exchange'], 1)
+        self.assertEqual(summary['skipped_zero'], 1)
+        self.assertEqual(summary['skipped_not_on_sheet'], 1)
+        self.assertFalse(Receipt.objects.filter(transaction=other_tx).exists())
+        self.assertEqual(self.sheet.appends, 0)
+
+    def test_skips_duplicate_sheet_receipts_and_receipts_without_items(self):
+        duplicate = self.make_tx(row=9, change='-5.00', comment='Dup')
+        bare = self.make_tx(row=10, change='-5.00', comment='Bare')
+        first = str(uuid.uuid4())
+        second = str(uuid.uuid4())
+        self.sheet.receipts.extend(
+            [
+                {
+                    'Receipt ID': first,
+                    'Transaction ID': str(duplicate.id),
+                    'Date': '2026-01-08',
+                    'Total': 5,
+                },
+                {
+                    'Receipt ID': second,
+                    'Transaction ID': str(duplicate.id),
+                    'Date': '2026-01-08',
+                    'Total': 5,
+                },
+                {
+                    'Receipt ID': str(uuid.uuid4()),
+                    'Transaction ID': str(bare.id),
+                    'Date': '2026-01-08',
+                    'Total': 5,
+                },
+            ]
+        )
+        summary = self.run_backfill()
+        self.assertEqual(summary['skipped_sheet_duplicate'], 1)
+        self.assertEqual(summary['skipped_sheet_receipt_without_items'], 1)
+        self.assertEqual(summary['created'], 0)
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    @patch('finance.api_views.sheets_for')
+    def test_management_api_dry_run(self, sheets_for, _token, get_user):
+        get_user.return_value = self.user
+        sheets_for.return_value = self.sheet
+        self.make_tx(row=11, change='-1.50', comment='Coffee')
+        response = self.client.post(
+            '/api/management/backfill-receipts',
+            data={'dryRun': True},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body['created'], 1)
+        self.assertTrue(body['dry_run'])
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+
+    def test_management_api_requires_auth(self):
+        response = self.client.post(
+            '/api/management/backfill-receipts',
+            data={'dryRun': True},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_command_dry_run_and_requires_token(self):
+        import os
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        self.make_tx(row=12, change='-2.25', comment='Tea')
+        with patch.dict(os.environ, {'GOOGLE_ACCESS_TOKEN': ''}):
+            with self.assertRaises(CommandError) as ctx:
+                call_command(
+                    'backfill_transaction_receipts',
+                    '--user-email',
+                    self.user.email,
+                )
+        self.assertIn('GOOGLE_ACCESS_TOKEN', str(ctx.exception))
+
+        User.objects.create(email='third@example.com', sheet_id='sheet-3')
+        with patch.dict(os.environ, {'GOOGLE_ACCESS_TOKEN': 'token'}):
+            with self.assertRaises(CommandError) as ctx:
+                call_command('backfill_transaction_receipts', '--dry-run')
+        self.assertIn('--user-email', str(ctx.exception))
+
+        with patch.dict(os.environ, {'GOOGLE_ACCESS_TOKEN': 'token'}):
+            with patch.object(
+                SheetsClient,
+                'get_mirror_source_rows',
+                return_value=self.sheet.get_mirror_source_rows(),
+            ):
+                call_command(
+                    'backfill_transaction_receipts',
+                    '--dry-run',
+                    '--user-email',
+                    self.user.email,
+                )
+        self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)

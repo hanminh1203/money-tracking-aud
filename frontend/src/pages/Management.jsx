@@ -3,6 +3,7 @@ import Card from '../components/Card';
 import { inputClass } from '../components/FormField';
 import PageHeader, { PageActions } from '../components/PageHeader';
 import {
+  backfillReceipts,
   exportManagement,
   fetchManagementSettings,
   fetchManagementStatus,
@@ -38,6 +39,8 @@ export default function Management() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [backfilling, setBackfilling] = useState(false);
+  const [backfillSummary, setBackfillSummary] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [error, setError] = useState(null);
   const [syncMessage, setSyncMessage] = useState(null);
@@ -156,7 +159,35 @@ export default function Management() {
     }
   };
 
-  const busy = loading || syncing || exporting || savingSettings;
+  const handleBackfill = async () => {
+    setBackfilling(true);
+    setError(null);
+    setBackfillSummary(null);
+    try {
+      const preview = await backfillReceipts({ dryRun: true });
+      const willWrite = (preview.created || 0) + (preview.repaired_from_sheet || 0);
+      if (!willWrite) {
+        setBackfillSummary(preview);
+        return;
+      }
+      const confirmed = window.confirm(
+        `Add ${preview.created} receipt line(s) and repair ${preview.repaired_from_sheet} already on the sheet? ${preview.placeholders} blank description(s) will be stored as "(no description)". Exchange (self) rows are skipped. The sheet is updated first so Sync keeps the new lines.`
+      );
+      if (!confirmed) {
+        setBackfillSummary(preview);
+        return;
+      }
+      const result = await backfillReceipts({ dryRun: false });
+      setBackfillSummary(result);
+      await loadStatus({ force: true });
+    } catch (err) {
+      setError(err.message || 'Backfill failed. Run it again to finish, or run Sync if the sheet already has the new lines.');
+    } finally {
+      setBackfilling(false);
+    }
+  };
+
+  const busy = loading || syncing || exporting || savingSettings || backfilling;
   const overallStatus = !hasSheet
     ? 'checking'
     : loading
@@ -240,10 +271,40 @@ export default function Management() {
           </div>
           {!hasSheet && settingsLoaded && (
             <p className="text-sm text-amber-700 dark:text-amber-400">
-              Save a sheet ID before sync, status, or export.
+              Save a sheet ID before sync, status, export, or receipt backfill.
             </p>
           )}
         </form>
+      </Card>
+
+      <Card title="Receipt lines">
+        <div className="space-y-3">
+          <p className="text-sm text-text-muted">
+            Transactions without a receipt get one line: the description, quantity 1 piece, and the
+            transaction amount. Exchange (self) transfers and giftcard purchases are skipped.
+            Blank descriptions are stored as &quot;(no description)&quot;. The sheet is written
+            first so Sync does not drop the new lines.
+          </p>
+          <button
+            type="button"
+            onClick={handleBackfill}
+            disabled={busy || !hasSheet}
+            className="btn-secondary"
+          >
+            {backfilling ? 'Backfilling…' : 'Backfill receipt lines'}
+          </button>
+          {backfillSummary && (
+            <p className="text-sm text-text-secondary">
+              {backfillSummary.dry_run ? 'Preview. ' : 'Finished. '}
+              Created {backfillSummary.created ?? 0}, repaired {backfillSummary.repaired_from_sheet ?? 0} from
+              the sheet, {backfillSummary.placeholders ?? 0} using &quot;(no description)&quot;.
+              Skipped {backfillSummary.skipped_has_receipt ?? 0} that already have a receipt,{' '}
+              {backfillSummary.skipped_exchange ?? 0} Exchange (self),{' '}
+              {backfillSummary.skipped_zero ?? 0} zero-amount,{' '}
+              {backfillSummary.skipped_not_on_sheet ?? 0} not on the sheet.
+            </p>
+          )}
+        </div>
       </Card>
 
       {error && (

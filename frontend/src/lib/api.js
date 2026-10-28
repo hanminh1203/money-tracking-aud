@@ -227,6 +227,10 @@ export function syncManagement() {
   return api('/management/sync', { method: 'POST' });
 }
 
+export function backfillReceipts({ dryRun = false } = {}) {
+  return api('/management/backfill-receipts', { method: 'POST', body: { dryRun } });
+}
+
 export function exportManagement() {
   return api('/management/export', { method: 'POST' });
 }

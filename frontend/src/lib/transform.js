@@ -44,6 +44,30 @@ export function formatDateShort(date) {
  * Do not use `Date#toISOString().slice(0, 10)` — that is UTC and is a day
  * behind in Australia (e.g. Perth UTC+8) during morning hours.
  */
+/**
+ * True when the transaction's receipt is still the single synthetic line
+ * created from its description (1 piece, money = abs(change)).
+ * A renamed line, a different unit, extra lines, or a different amount means
+ * the receipt was edited and must not be overwritten from the description.
+ */
+export function isAutoReceipt(tx) {
+  const receipt = tx?.receipt;
+  const items = receipt?.items;
+  if (!receipt || !Array.isArray(items) || items.length !== 1) return false;
+  const item = items[0];
+  const comment = String(tx.comment || '').trim();
+  const name = String(item?.name || '').trim();
+  if (!comment || name !== comment) return false;
+  if (String(item?.unit || '').trim().toLowerCase() !== 'piece') return false;
+  const amount = Number(item?.amount);
+  if (!Number.isFinite(amount) || Math.abs(amount - 1) > 0.0001) return false;
+  const money = Math.abs(Number(tx.change));
+  if (!Number.isFinite(money) || money <= 0) return false;
+  const itemMoney = Math.abs(Number(item?.money));
+  const total = Math.abs(Number(receipt.total));
+  return Math.abs(itemMoney - money) < 0.009 && Math.abs(total - money) < 0.009;
+}
+
 export function localDateIso(date = new Date()) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');

@@ -15,7 +15,7 @@ import {
   getTransaction,
   updateTransaction,
 } from '../lib/api';
-import { formatAUD, formatDateShort, parseDate } from '../lib/transform';
+import { formatAUD, formatDateShort, isAutoReceipt, parseDate } from '../lib/transform';
 
 function BackLink() {
   return (
@@ -134,6 +134,9 @@ function initialGiftcardPayments(data) {
 function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   const navigate = useNavigate();
   const hasReceipt = Boolean(data.receiptId && data.receipt);
+  const autoReceipt = isAutoReceipt(data);
+  const [editItems, setEditItems] = useState(hasReceipt && !autoReceipt);
+  const showReceiptEditor = hasReceipt && editItems;
   const initialType =
     data.type === 'Income' || data.type === 'Expense'
       ? data.type
@@ -211,7 +214,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     [payments, giftcardPayments]
   );
 
-  const effectiveAmount = hasReceipt ? itemsTotal : Math.abs(Number(amount)) || 0;
+  const effectiveAmount = showReceiptEditor ? itemsTotal : Math.abs(Number(amount)) || 0;
 
   const fundingMatch =
     effectiveAmount > 0 && Math.abs(effectiveAmount - paymentsTotal) < 0.009;
@@ -222,22 +225,27 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     (payments.some((p) => p.source && Number(p.amount) > 0)
       || giftcardPayments.some((p) => p.giftcardId && Number(p.amount) > 0)) &&
     subCategory &&
+    comment.trim() &&
     fundingMatch &&
     !submitting &&
-    (!hasReceipt || items.some((it) => it.name.trim() && Number(it.money) > 0));
+    (!showReceiptEditor || items.some((it) => it.name.trim() && Number(it.money) > 0));
 
   async function handleSubmit(e) {
     e.preventDefault();
+    if (!comment.trim()) {
+      setStatus({ ok: false, msg: 'Description is required.' });
+      return;
+    }
     if (!canSubmit) return;
     setSubmitting(true);
     setStatus(null);
     try {
       const payload = {
         date,
-        amount: hasReceipt ? itemsTotal : amount,
+        amount: showReceiptEditor ? itemsTotal : amount,
         type,
         subCategory,
-        comment,
+        comment: comment.trim(),
         payments: payments
           .filter((p) => p.source && Number(p.amount) > 0)
           .map((p) => ({ source: p.source, amount: Number(p.amount) })),
@@ -245,7 +253,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
           .filter((p) => p.giftcardId && Number(p.amount) > 0)
           .map((p) => ({ giftcardId: p.giftcardId, amount: Number(p.amount) })),
       };
-      if (hasReceipt) {
+      if (showReceiptEditor) {
         payload.items = items
           .filter((it) => it.name.trim() && Number(it.money) > 0)
           .map((it) => ({
@@ -261,7 +269,10 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
       const refreshed = await getTransaction(data.id);
       onUpdated?.(refreshed);
       onSaved?.();
-      setStatus({ ok: true, msg: hasReceipt ? 'Transaction and receipt saved.' : 'Transaction saved.' });
+      setStatus({
+        ok: true,
+        msg: showReceiptEditor || autoReceipt ? 'Transaction and receipt saved.' : 'Transaction saved.',
+      });
     } catch (err) {
       setStatus({ ok: false, msg: err.message || String(err) });
     } finally {
@@ -294,7 +305,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
     <form onSubmit={handleSubmit} className="space-y-5">
       <div
         className={
-          hasReceipt ? 'grid grid-cols-1 md:grid-cols-2 gap-4 items-start' : 'max-w-xl'
+          showReceiptEditor ? 'grid grid-cols-1 md:grid-cols-2 gap-4 items-start' : 'max-w-xl'
         }
       >
         <Card title="Transaction details">
@@ -472,7 +483,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
               </Field>
             )}
 
-            {!hasReceipt && (
+            {!showReceiptEditor && (
               <Field label="Amount (AUD)">
                 <DecimalInput
                   placeholder="0.00"
@@ -484,25 +495,50 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
               </Field>
             )}
 
-            {hasReceipt && (
+            {showReceiptEditor && (
               <p className="text-sm text-text-muted">
                 Total: {formatAUD(itemsTotal)} · Payments: {formatAUD(paymentsTotal)}
               </p>
             )}
 
-            <Field label="Comment">
+            {autoReceipt && !showReceiptEditor && (
+              <div className="space-y-2">
+                <p className="text-sm text-text-muted">
+                  One receipt line stays in sync with this description and amount (1 piece).
+                  Monthly totals still use the transaction amount once.
+                </p>
+                <button
+                  type="button"
+                  className="text-sm text-accent hover:text-accent-hover cursor-pointer"
+                  onClick={() => {
+                    setEditItems(true);
+                    if (!items.length) {
+                      setItems((data.receipt.items || []).map(toReceiptItemForm));
+                    }
+                  }}
+                >
+                  Edit receipt items
+                </button>
+              </div>
+            )}
+
+            <Field label="Description">
               <input
                 type="text"
                 placeholder="e.g. Woolworths groceries"
                 value={comment}
                 onChange={(e) => setComment(e.target.value)}
                 className={inputClass}
+                required
               />
+              {!comment.trim() && (
+                <p className="text-sm text-expense mt-1.5">Description is required.</p>
+              )}
             </Field>
           </div>
         </Card>
 
-        {hasReceipt && (
+        {showReceiptEditor && (
           <Card title="Receipt items">
             {items.length === 0 ? (
               <div className="space-y-3">
@@ -526,12 +562,12 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
         )}
       </div>
 
-      {hasReceipt && itemsTotal > 0 && !fundingMatch && (
+      {showReceiptEditor && itemsTotal > 0 && !fundingMatch && (
         <p className="text-sm text-expense">
           Payment total ({formatAUD(paymentsTotal)}) must equal items total ({formatAUD(itemsTotal)}).
         </p>
       )}
-      {!hasReceipt && effectiveAmount > 0 && !fundingMatch && (
+      {!showReceiptEditor && effectiveAmount > 0 && !fundingMatch && (
         <p className="text-sm text-expense">
           Payment total ({formatAUD(paymentsTotal)}) must equal amount ({formatAUD(effectiveAmount)}).
         </p>
