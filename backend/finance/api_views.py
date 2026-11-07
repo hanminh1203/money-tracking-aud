@@ -35,10 +35,6 @@ from .db_reader import (
 )
 from .db_sync import SyncError, compare_mirror, sync_from_sheets
 from .receipt_backfill import BackfillWriteError, backfill_missing_receipts
-from .receipt_item_subcategory import (
-    ItemSubcategoryBackfillError,
-    backfill_receipt_item_subcategories,
-)
 from .db_writer import DualWriteError
 from .groq_client import GroqError, extract_receipt_from_image, parse_finance_message
 from .models import User
@@ -694,28 +690,6 @@ def management_backfill_receipts(request: HttpRequest) -> JsonResponse:
             dry_run=dry_run,
         )
     except BackfillWriteError as exc:
-        return JsonResponse({'error': str(exc), 'summary': exc.summary}, status=exc.status)
-    except SyncError as exc:
-        return json_error(str(exc))
-    except (ValueError, SheetsError, DualWriteError) as exc:
-        return json_sheets_write_error(exc)
-    return JsonResponse(result)
-
-
-@require_POST
-@require_auth
-def management_backfill_item_subcategories(request: HttpRequest) -> JsonResponse:
-    """Fill blank receipt-item subcategories on this user's sheet, then in Postgres."""
-    user: User = request.finance_user  # type: ignore[attr-defined]
-    try:
-        body = parse_json(request)
-        dry_run = _parse_dry_run(body.get('dryRun'))
-        result = backfill_receipt_item_subcategories(
-            user=user,
-            client=sheets_for(request),
-            dry_run=dry_run,
-        )
-    except ItemSubcategoryBackfillError as exc:
         return JsonResponse({'error': str(exc), 'summary': exc.summary}, status=exc.status)
     except SyncError as exc:
         return json_error(str(exc))

@@ -86,7 +86,7 @@ The app expects Google Sheets **Insert → Table** names (configurable via env):
 | `Transactions` | Appends on create (dual-written to Postgres; list reads from Postgres) |
 | `Computed_Transactions` | Legacy computed view (no longer used by the API) |
 | `Category` / `Sources` | Dropdown metadata (mirrored to Postgres via Management Sync) |
-| `Receipt` / `Receipt_Items` | Appends on create (dual-written to Postgres; detail reads from Postgres). `Receipt_Items` columns: `Receipt Item ID`, `Receipt ID`, `Name`, `Amount`, `Unit`, `Money`, `Sub category` (column 7, immediately after `Money`). Existing spreadsheets must add `Sub category` — the app cannot create it. |
+| `Receipt` / `Receipt_Items` | Appends on create (dual-written to Postgres; detail reads from Postgres). `Receipt_Items` columns: `Receipt Item ID`, `Receipt ID`, `Name`, `Amount`, `Unit`, `Money`, `Sub category` (column 7, immediately after `Money`). Migrations fill blank item subcategories in Postgres from the transaction. Existing spreadsheets must add `Sub category` and copy each item from its transaction before Sync — Sync reloads Postgres from the sheet. |
 | `Product` / `Product_Items` | Product catalog and purchase links. `Product_Items` columns: `Product Item ID`, `Product ID`, `Price`, `Transaction ID`, `Receipt Item ID`, `End Date` (optional DATE; when the purchase is expected to run out). Existing spreadsheets must add the `End Date` column — the app cannot create it on a user-managed sheet. |
 
 ## Deploy on Vercel

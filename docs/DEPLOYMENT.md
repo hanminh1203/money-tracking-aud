@@ -90,24 +90,11 @@ Put `GOOGLE_ACCESS_TOKEN` in the environment, not after the command name. If the
 and Postgres does not, the command exits with an error. Run it again (it mirrors the sheet receipt)
 or use Management → Sync. Details: [transaction-receipts.md](transaction-receipts.md).
 
-## 6. Backfill receipt item subcategories
+## 6. Receipt item subcategories
 
-Receipt items created before subcategory lived on the line have a blank `Sub category` cell. Homepage monthly breakdown falls back to the transaction subcategory until that cell is filled. Run this once per user after adding the column. It is safe to run again: cells that already have a subcategory are not overwritten.
+Migrate adds the receipt-item subcategory and copies each transaction subcategory onto items that have none. That step is Postgres only. It runs with `python manage.py migrate` (and with the GitHub Actions migrate workflow). There is no sheet backfill.
 
-**Hosted app:** Management → Backfill item subcategories. The button previews counts, then writes.
-
-**Shell against production data** (session pooler):
-
-```bash
-cd backend
-GOOGLE_ACCESS_TOKEN="<access token from a signed-in session>" \
-DATABASE_URL="<session pooler url>" \
-DJANGO_DEBUG=false \
-DJANGO_SECRET_KEY="<production secret, or any 32+ char string if you only run this command>" \
-python manage.py backfill_receipt_item_subcategories --dry-run --user-email you@example.com
-```
-
-Write the same way without `--dry-run`. Put `GOOGLE_ACCESS_TOKEN` in the environment, not after the command name. If the sheet write succeeds and Postgres does not, the command exits with an error. Run it again (it copies the sheet cell into Postgres). Details: [receipt-item-subcategory.md](receipt-item-subcategory.md).
+Before **Management → Sync**, add `Sub category` as column 7 on `Receipt_Items` (immediately after `Money`) and fill each item from its transaction. Sync reloads Postgres from the sheet, so a blank column replaces the values the migration wrote. Homepage totals still fall back to the transaction subcategory. Details and a lookup formula: [receipt-item-subcategory.md](receipt-item-subcategory.md).
 
 ## 7. Automatic deploys
 

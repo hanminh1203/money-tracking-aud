@@ -28,9 +28,9 @@ Tab: `Receipt_Items` (or `RECEIPT_ITEMS_TABLE` if you renamed it).
 
 The header is exactly `Sub category` (capital S, lowercase c), the same spelling as on `Transactions`. The app also accepts `Sub Category` when it reads. It writes `Sub category`.
 
-Column 7 sits immediately after `Money`. The seven named columns must be one contiguous block. A column between them makes an append fail. The value must match a `Sub category` on the `Category` tab for that user. A blank cell is allowed; backfill fills it, and the homepage treats a blank line as the transaction subcategory.
+Column 7 sits immediately after `Money`. The seven named columns must be one contiguous block. A column between them makes an append fail. The value must match a `Sub category` on the `Category` tab for that user. A blank cell is allowed. The homepage treats a blank line as the transaction subcategory, so totals stay correct until the cell is filled.
 
-The app cannot create the column on a user-managed sheet.
+The app cannot create the column on a user-managed sheet. Migrate the sheet by hand. There is no backfill command for this column.
 
 ## Homepage monthly breakdown
 
@@ -45,88 +45,74 @@ The three-month subcategory table splits each of those same signed amounts:
 
 A blank line subcategory, or one whose category type is not the transaction's type, is labelled with the transaction subcategory. Income stays positive. Expense stays negative. The pieces sum to the transaction change, so the month's subcategory rows still add up to the transaction-based income and expense. Receipt totals are not added again, and giftcard funding is not a second spend.
 
-## Backfill
+## Database migration
 
-`python manage.py backfill_receipt_item_subcategories` fills blank `Receipt_Items` → `Sub category` cells from the transaction.
+`python manage.py migrate` adds `receipt_item.category_id` and then copies each transaction's subcategory onto receipt items that do not have one. Only nulls are filled. An item that already has a subcategory is left as it is. An item whose transaction has no subcategory stays blank. The reverse migration does not clear those values.
 
-- The sheet is written first, then Postgres, so Management → Sync does not clear the cells.
-- `--dry-run` counts and writes nothing. Management → **Backfill item subcategories** previews the same way, then asks before it writes.
-- A cell that already has a subcategory is not overwritten.
-- If the sheet cell is filled and Postgres is blank or different, Postgres is set from the sheet and the sheet cell is left as it is.
-- The sheet transaction subcategory is used when it matches a Category row. Otherwise the Postgres transaction subcategory is used.
-- A transaction with no subcategory, or a subcategory that is not on the Category tab, is skipped.
-- Re-running is safe.
+This writes Postgres only. It does not call Google Sheets.
 
-`python manage.py backfill_transaction_receipts` writes the same column on lines it creates.
+**Do not run Management → Sync until the sheet column is filled.** Sync deletes the Postgres rows for these tables and reloads them from the sheet. A blank `Sub category` cell becomes a null category and replaces the value the migration just wrote. Homepage totals still match, because a blank line falls back to the transaction subcategory, but any subcategory you had only in Postgres is gone.
 
 ## How to update data on the Google Sheet
 
+The database is updated by the migration. The spreadsheet is updated by you.
+
 ### 1. Backup
 
-In Google Sheets, **File → Make a copy** of the live spreadsheet. The app writes to the spreadsheet ID saved under Management. The copy is the rollback. Restoring also discards other sheet edits made after the copy.
+In Google Sheets, **File → Make a copy** of the live spreadsheet. The app writes to the spreadsheet ID saved under Management. The copy is the rollback.
 
-### 2. Add the column
+### 2. Run migrations
 
-On the `Receipt_Items` table:
+Deploy, or run migrate against the session pooler. Postgres receipt items with no subcategory are filled from their transaction. You do not run a management command or a Management button for this.
+
+```bash
+cd backend
+DATABASE_URL="<session pooler url>" \
+DJANGO_DEBUG=false \
+DJANGO_SECRET_KEY="<32+ character secret>" \
+python manage.py migrate
+```
+
+GitHub Actions runs the same migrate on push when `MIGRATION_DATABASE_URL` is set. See [DEPLOYMENT.md](DEPLOYMENT.md).
+
+### 3. Add the column
+
+On the `Receipt_Items` table, before any Sync:
 
 1. Confirm the current columns, in order, are `Receipt Item ID`, `Receipt ID`, `Name`, `Amount`, `Unit`, `Money`.
 2. Add a column immediately after `Money`. Do not insert it between the existing columns.
 3. Set the header to exactly `Sub category`.
-4. Include that column in the named table so it is column 7. Leave existing item cells blank. The backfill fills them.
-5. If Management says Postgres is behind the sheet, run **Sync** first.
+4. Include that column in the named table so it is column 7.
 
-### 3. Preview, then write
+### 4. Fill the column from the transaction
 
-**Management (signed-in session)**
+Each existing item should get the subcategory of the transaction its receipt belongs to.
 
-1. Open **Management**. The sheet ID must already be saved.
-2. Click **Backfill item subcategories**. The app runs a dry run and does not write yet.
-3. If nothing would change, it shows the preview and stops.
-4. Otherwise confirm the dialog. **Cancel** leaves the sheet unchanged.
-5. Confirming writes the sheet first, then Postgres, then refreshes Management status.
+Suggested approach:
 
-**Management command**
+1. On `Receipt_Items`, in the new `Sub category` column, use a lookup through `Receipt` to `Transactions`. With the default headers, for the data row in row 2 (adjust the row and the ranges to your sheet):
 
-Preview, which reads the sheet and writes nothing:
-
-```bash
-cd backend
-GOOGLE_ACCESS_TOKEN="<google access token>" \
-DATABASE_URL="<session pooler url>" \
-DJANGO_DEBUG=false \
-DJANGO_SECRET_KEY="<32+ character secret>" \
-python manage.py backfill_receipt_item_subcategories --dry-run --user-email you@example.com
+```
+=IFERROR(INDEX(Transactions[Sub category], MATCH(INDEX(Receipt[Transaction ID], MATCH([@[Receipt ID]], Receipt[Receipt ID], 0)), Transactions[Transaction ID], 0)), "")
 ```
 
-Write the same way without `--dry-run`. Put `GOOGLE_ACCESS_TOKEN` in the environment, not on the command line. Pass `--user-email` when more than one user exists.
+`[@[Receipt ID]]` is the receipt id on that `Receipt_Items` row. Named tables use the table names you actually have (`Receipt`, `Transactions`, `Receipt_Items`).
 
-`updated` is how many blank cells will be filled from the transaction. `repaired_from_sheet` is how many cells already set on the sheet will be copied into Postgres with no sheet change. `skipped_already_set` is cells that already match.
+2. Fill the formula down the column.
+3. Spot-check a few rows against the transaction.
+4. Copy the column and **Paste special → Values only**, so the cells are text rather than formulas. The app reads values.
 
-### 4. What gets written
+An item you want in a different subcategory can be typed over after the paste. Leave `Exchange (self)` transactions alone: they have no receipt.
 
-Only blank `Sub category` cells on `Receipt_Items`. The transaction row is not changed. No rows are appended.
+### 5. Verify, then Sync
 
-Example. The transaction is Groceries and the item cell is blank:
-
-| Receipt Item ID | Receipt ID | Name | Amount | Unit | Money | Sub category |
-| --- | --- | --- | --- | --- | --- | --- |
-| `33333333-3333-3333-3333-333333333333` | `22222222-2222-2222-2222-222222222222` | Milk | 1 | piece | 8.50 | Groceries |
-
-An item that already says `Household` stays `Household`, even when the transaction says `Groceries`.
-
-### 5. Verify
-
-1. `updated` matches the number of cells that changed from blank to a subcategory.
-2. Spot-check one item: its `Sub category` equals its transaction's `Sub category`.
-3. Spot-check one item that already had a different subcategory: that cell is unchanged.
-4. Spot-check an `Exchange (self)` row: it still has no receipt.
-5. Open **Management** and refresh status. **Receipt_Items** should match the sheet. Run **Sync** only if status still shows a drift you want Postgres to take from the sheet.
+1. Spot-check one item: `Sub category` equals its transaction's `Sub category`.
+2. Spot-check one item you set by hand to something else: that cell is unchanged.
+3. Open **Management** and refresh status. **Receipt_Items** will show a mismatch until the sheet matches Postgres.
+4. Run **Sync** only after the column is filled. Sync reloads Postgres from the sheet. Blank cells replace the migrated categories. Until you Sync, the app keeps the migrated Postgres values, and a blank sheet cell is not read.
 
 ### 6. Rollback
 
-Sync copies the sheet into Postgres and deletes the previous Postgres rows for those tables. Restore the sheet first, then Sync.
+To undo the sheet edit, restore `Receipt_Items` from the backup, then run **Sync** only if you also want Postgres to drop the filled categories. Restoring the sheet and then Syncing copies the blanks back into Postgres. Homepage totals still fall back to the transaction subcategory.
 
-1. Put the backup back into the live spreadsheet (the ID saved in Management), including `Receipt_Items`. A separate copy does nothing until the live spreadsheet is restored.
-2. Open **Management** and run **Sync**.
-
-If the sheet write succeeded and Postgres failed, do not restore yet. Run the backfill again. It copies the filled sheet cells into Postgres.
+To undo only the database fill, restore a database backup from before migrate. The reverse of this migration does not clear `category_id`.

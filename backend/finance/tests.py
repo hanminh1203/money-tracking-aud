@@ -4644,22 +4644,25 @@ class ReceiptItemSubcategoryTests(TestCase):
         self.assertTrue(ReceiptItem.objects.filter(pk=milk_id).exists())
 
 
-class ItemSubcategoryBackfillTests(TestCase):
+
+
+class ReceiptItemCategoryMigrationTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create(email='sub-bf@example.com', sheet_id='sheet-sub-bf')
-        self.other = User.objects.create(email='sub-bf-other@example.com', sheet_id='sheet-sub-bf-2')
+        self.user = User.objects.create(email='mig-sub@example.com', sheet_id='sheet-mig')
+        self.other = User.objects.create(email='mig-sub-other@example.com', sheet_id='sheet-mig-2')
         self.groceries = Category.objects.create(
             user=self.user, main_category='Living', sub_category='Groceries', type='Expense'
         )
         self.rent = Category.objects.create(
             user=self.user, main_category='Living', sub_category='Rent', type='Expense'
         )
-        self.sheet = _SubcategorySheet()
+        self.other_groceries = Category.objects.create(
+            user=self.other, main_category='Living', sub_category='Groceries', type='Expense'
+        )
 
-    def make_pair(self, *, row, item_sub='', tx_sub='Groceries'):
-        category = Category.objects.get(user=self.user, sub_category=tx_sub)
+    def _item(self, *, user, category, item_category, row):
         tx = Transaction.objects.create(
-            user=self.user,
+            user=user,
             row_number=row,
             date=date(2026, 1, 8),
             change=Decimal('-8.50'),
@@ -4667,13 +4670,10 @@ class ItemSubcategoryBackfillTests(TestCase):
             comment='Milk',
         )
         receipt = Receipt.objects.create(
-            user=self.user, transaction=tx, date=tx.date, total=Decimal('8.50')
+            user=user, transaction=tx, date=tx.date, total=Decimal('8.50')
         )
-        item_category = None
-        if item_sub:
-            item_category = Category.objects.get(user=self.user, sub_category=item_sub)
         item = ReceiptItem.objects.create(
-            user=self.user,
+            user=user,
             receipt=receipt,
             name='Milk',
             amount=Decimal('1'),
@@ -4681,217 +4681,53 @@ class ItemSubcategoryBackfillTests(TestCase):
             money=Decimal('8.50'),
             category=item_category,
         )
-        self.sheet.transactions.append(
-            {
-                '__sheet_row': row,
-                'Transaction ID': str(tx.id),
-                'Date': '2026-01-08',
-                'Change': -8.5,
-                'Comment': 'Milk',
-                'Sub category': tx_sub,
-            }
+        return item
+
+    def _run(self, direction='forwards'):
+        import importlib
+
+        from django.db import connection
+
+        migration = importlib.import_module(
+            'finance.migrations.0019_fill_receiptitem_category'
         )
-        self.sheet.receipts.append(
-            {
-                'Receipt ID': str(receipt.id),
-                'Transaction ID': str(tx.id),
-                'Date': '2026-01-08',
-                'Total': 8.5,
-            }
+        fn = (
+            migration.fill_blank_item_categories
+            if direction == 'forwards'
+            else migration.noop
         )
-        self.sheet.items.append(
-            {
-                '__sheet_row': 20 + row,
-                'Receipt Item ID': str(item.id),
-                'Receipt ID': str(receipt.id),
-                'Name': 'Milk',
-                'Amount': 1,
-                'Unit': 'piece',
-                'Money': 8.5,
-                'Sub category': item_sub,
-            }
+        with connection.schema_editor() as schema_editor:
+            fn(None, schema_editor)
+
+    def test_fills_nulls_only_and_reverse_is_a_noop(self):
+        blank = self._item(user=self.user, category=self.groceries, item_category=None, row=1)
+        kept = self._item(user=self.user, category=self.groceries, item_category=self.rent, row=2)
+        no_tx_category = self._item(user=self.user, category=None, item_category=None, row=3)
+        other_blank = self._item(
+            user=self.other, category=self.other_groceries, item_category=None, row=1
         )
-        return tx, item
+        blank_version = blank.version
 
-    def run_backfill(self, *, dry_run=False):
-        from finance.receipt_item_subcategory import backfill_receipt_item_subcategories
+        self._run('forwards')
+        blank.refresh_from_db()
+        kept.refresh_from_db()
+        no_tx_category.refresh_from_db()
+        other_blank.refresh_from_db()
+        self.assertEqual(blank.category_id, self.groceries.id)
+        self.assertEqual(blank.version, blank_version + 1)
+        self.assertEqual(kept.category_id, self.rent.id)
+        self.assertIsNone(no_tx_category.category_id)
+        self.assertEqual(other_blank.category_id, self.other_groceries.id)
 
-        return backfill_receipt_item_subcategories(
-            user=self.user, client=self.sheet, dry_run=dry_run
-        )
+        self._run('forwards')
+        blank.refresh_from_db()
+        kept.refresh_from_db()
+        self.assertEqual(blank.category_id, self.groceries.id)
+        self.assertEqual(blank.version, blank_version + 1)
+        self.assertEqual(kept.category_id, self.rent.id)
 
-    def test_dry_run_then_write_is_idempotent_and_skips_other_users(self):
-        _tx, item = self.make_pair(row=2)
-        other_category = Category.objects.create(
-            user=self.other, main_category='Living', sub_category='Groceries', type='Expense'
-        )
-        other_tx = Transaction.objects.create(
-            user=self.other,
-            row_number=1,
-            date=date(2026, 1, 8),
-            change=Decimal('-1.00'),
-            category=other_category,
-            comment='Other',
-        )
-        other_receipt = Receipt.objects.create(
-            user=self.other, transaction=other_tx, date=other_tx.date, total=Decimal('1.00')
-        )
-        other_item = ReceiptItem.objects.create(
-            user=self.other,
-            receipt=other_receipt,
-            name='Other',
-            amount=Decimal('1'),
-            unit='piece',
-            money=Decimal('1.00'),
-        )
-        preview = self.run_backfill(dry_run=True)
-        self.assertEqual(preview['updated'], 1)
-        self.assertTrue(preview['dry_run'])
-        self.assertEqual(self.sheet.writes, [])
-        self.assertIsNone(item.category_id)
-
-        written = self.run_backfill()
-        self.assertEqual(written['updated'], 1)
-        item.refresh_from_db()
-        self.assertEqual(item.category_id, self.groceries.id)
-        self.assertEqual(self.sheet.items[0]['Sub category'], 'Groceries')
-        again = self.run_backfill()
-        self.assertEqual(again['updated'], 0)
-        self.assertEqual(again['skipped_already_set'], 1)
-        other_item.refresh_from_db()
-        self.assertIsNone(other_item.category_id)
-
-    def test_does_not_overwrite_a_subcategory_already_on_the_item(self):
-        _tx, item = self.make_pair(row=3, item_sub='Rent', tx_sub='Groceries')
-        summary = self.run_backfill()
-        self.assertEqual(summary['updated'], 0)
-        self.assertEqual(summary['skipped_already_set'], 1)
-        item.refresh_from_db()
-        self.assertEqual(item.category.sub_category, 'Rent')
-        self.assertEqual(self.sheet.items[0]['Sub category'], 'Rent')
-        self.assertEqual(self.sheet.writes, [])
-
-    def test_repairs_postgres_from_a_filled_sheet_cell(self):
-        _tx, item = self.make_pair(row=4, item_sub='Rent')
-        item.category = None
-        item.save(update_fields=['category'])
-        summary = self.run_backfill()
-        self.assertEqual(summary['repaired_from_sheet'], 1)
-        self.assertEqual(summary['updated'], 0)
-        item.refresh_from_db()
-        self.assertEqual(item.category.sub_category, 'Rent')
-        self.assertEqual(self.sheet.writes, [])
-
-    def test_sheet_write_then_postgres_failure_is_repaired_on_rerun(self):
-        from finance.receipt_item_subcategory import ItemSubcategoryBackfillError
-
-        _tx, item = self.make_pair(row=5)
-        with patch.object(ReceiptItem, 'save', side_effect=RuntimeError('postgres down')):
-            with self.assertRaises(ItemSubcategoryBackfillError):
-                self.run_backfill()
-        self.assertEqual(self.sheet.items[0]['Sub category'], 'Groceries')
-        item.refresh_from_db()
-        self.assertIsNone(item.category_id)
-        summary = self.run_backfill()
-        self.assertEqual(summary['repaired_from_sheet'], 1)
-        item.refresh_from_db()
-        self.assertEqual(item.category.sub_category, 'Groceries')
-
-    def test_missing_column_is_rejected_before_writes(self):
-        self.sheet.with_column = False
-        self.make_pair(row=6)
-        with self.assertRaises(SheetsError) as ctx:
-            self.run_backfill()
-        self.assertIn('Sub category', str(ctx.exception))
-        self.assertEqual(self.sheet.writes, [])
-
-    @patch('finance.api_views.oauth.get_finance_user')
-    @patch('finance.api_views.oauth.get_access_token', return_value='token')
-    @patch('finance.api_views.sheets_for')
-    def test_management_api_dry_run(self, sheets_for, _token, get_user):
-        get_user.return_value = self.user
-        sheets_for.return_value = self.sheet
-        self.make_pair(row=7)
-        response = self.client.post(
-            '/api/management/backfill-item-subcategories',
-            data={'dryRun': True},
-            content_type='application/json',
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertTrue(body['dry_run'])
-        self.assertEqual(body['updated'], 1)
-        self.assertEqual(self.sheet.writes, [])
-
-    def test_management_api_requires_auth(self):
-        response = self.client.post(
-            '/api/management/backfill-item-subcategories',
-            data={'dryRun': True},
-            content_type='application/json',
-        )
-        self.assertEqual(response.status_code, 401)
-
-    def test_command_dry_run_requires_token_and_email(self):
-        import os
-        from django.core.management import call_command
-        from django.core.management.base import CommandError
-
-        self.make_pair(row=8)
-        with patch.dict(os.environ, {'GOOGLE_ACCESS_TOKEN': ''}, clear=False):
-            with self.assertRaises(CommandError) as ctx:
-                call_command(
-                    'backfill_receipt_item_subcategories',
-                    '--user-email',
-                    self.user.email,
-                )
-        self.assertIn('GOOGLE_ACCESS_TOKEN', str(ctx.exception))
-
-        with patch.dict(os.environ, {'GOOGLE_ACCESS_TOKEN': 'token'}):
-            with patch.object(SheetsClient, 'get_table', return_value=self.sheet.get_table('x')):
-                with patch.object(
-                    SheetsClient,
-                    'get_mirror_source_rows',
-                    return_value=self.sheet.get_mirror_source_rows(),
-                ):
-                    call_command(
-                        'backfill_receipt_item_subcategories',
-                        '--dry-run',
-                        '--user-email',
-                        self.user.email,
-                    )
-        self.assertIsNone(ReceiptItem.objects.get(receipt__transaction__row_number=8).category_id)
-
-
-class _SubcategorySheet:
-    def __init__(self):
-        self.with_column = True
-        self.transactions = []
-        self.receipts = []
-        self.items = []
-        self.writes = []
-
-    def get_table(self, _name):
-        columns = [
-            {'name': 'Receipt Item ID'},
-            {'name': 'Receipt ID'},
-            {'name': 'Name'},
-            {'name': 'Amount'},
-            {'name': 'Unit'},
-            {'name': 'Money'},
-        ]
-        if self.with_column:
-            columns.append({'name': 'Sub category'})
-        return {'columns': columns}
-
-    def get_mirror_source_rows(self):
-        return {
-            'transactions': self.transactions,
-            'receipts': self.receipts,
-            'receipt_items': self.items,
-        }
-
-    def update_table_cell_at_row(self, _table, *, sheet_row, update_column, new_value):
-        self.writes.append((sheet_row, update_column, new_value))
-        for row in self.items:
-            if row.get('__sheet_row') == sheet_row and update_column == 'Sub category':
-                row['Sub category'] = new_value
+        self._run('backwards')
+        blank.refresh_from_db()
+        kept.refresh_from_db()
+        self.assertEqual(blank.category_id, self.groceries.id)
+        self.assertEqual(kept.category_id, self.rent.id)

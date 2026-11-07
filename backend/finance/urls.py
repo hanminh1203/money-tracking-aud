@@ -33,11 +33,6 @@ urlpatterns = [
         api_views.management_backfill_receipts,
         name='management_backfill_receipts',
     ),
-    path(
-        'management/backfill-item-subcategories',
-        api_views.management_backfill_item_subcategories,
-        name='management_backfill_item_subcategories',
-    ),
     path('management/export', api_views.management_export, name='management_export'),
     path('management/settings', api_views.management_settings, name='management_settings'),
 ]
