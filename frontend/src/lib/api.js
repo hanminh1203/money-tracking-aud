@@ -231,6 +231,10 @@ export function backfillReceipts({ dryRun = false } = {}) {
   return api('/management/backfill-receipts', { method: 'POST', body: { dryRun } });
 }
 
+export function backfillItemSubcategories({ dryRun = false } = {}) {
+  return api('/management/backfill-item-subcategories', { method: 'POST', body: { dryRun } });
+}
+
 export function exportManagement() {
   return api('/management/export', { method: 'POST' });
 }

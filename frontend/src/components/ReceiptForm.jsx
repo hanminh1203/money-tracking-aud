@@ -2,13 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { DecimalInput, Field, inputClass, selectClass } from './FormField';
 import { addReceipt, extractReceiptFromImage, getGiftcards } from '../lib/api';
 import { fileToDataUrl } from '../lib/imageUtils';
-import { formatAUD, localDateIso } from '../lib/transform';
+import { formatAUD, localDateIso, nextItemsAfterSubCategoryChange } from '../lib/transform';
 
 const UNITS = ['kg', 'g', 'ml', 'l', 'piece'];
 
 const emptySource = () => ({ source: '', amount: '' });
 const emptyGiftcardPayment = () => ({ giftcardId: '', amount: '' });
-const emptyItem = () => ({ name: '', amount: '', unit: 'piece', money: '' });
+const emptyItem = (subCategory = '') => ({
+  name: '',
+  amount: '',
+  unit: 'piece',
+  money: '',
+  subCategory: subCategory || '',
+});
 
 const cancelClass = 'btn-secondary';
 const submitClass = 'btn-secondary';
@@ -142,8 +148,13 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
     setComment('');
     setSources([emptySource()]);
     setGiftcardPayments([]);
-    setItems([emptyItem()]);
+    setItems([emptyItem('')]);
     setPreviewUrl(null);
+  }
+
+  function handleSubCategoryChange(next) {
+    setItems((prev) => nextItemsAfterSubCategoryChange(prev, subCategory, next));
+    setSubCategory(next);
   }
 
   async function handleImageSelected(e) {
@@ -167,11 +178,18 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
       // Replace every form field with the AI result (do not merge).
       setStore(extracted.store);
       setDate(extracted.date);
-      setSubCategory(extracted.subCategory);
+      const extractedSub = extracted.subCategory || '';
+      setSubCategory(extractedSub);
       setComment(extracted.comment);
       setSources(extracted.sources?.length ? extracted.sources : [emptySource()]);
       setGiftcardPayments([]);
-      setItems(extracted.items);
+      setItems(
+        (extracted.items || [emptyItem(extractedSub)]).map((it) => ({
+          ...emptyItem(extractedSub),
+          ...it,
+          subCategory: it.subCategory || extractedSub,
+        }))
+      );
       setStatus({
         ok: true,
         msg: `Extracted ${extracted.items.filter((it) => it.name).length} item(s) from receipt — review and save.`,
@@ -203,7 +221,12 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
         subCategory,
         comment,
         sources: [...paymentRows, ...giftcardRows],
-        items: items.filter((it) => it.name.trim() && Number(it.money) > 0),
+        items: items
+          .filter((it) => it.name.trim() && Number(it.money) > 0)
+          .map((it) => ({
+            ...it,
+            subCategory: it.subCategory || subCategory,
+          })),
       });
       setStatus({
         ok: true,
@@ -283,7 +306,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
         <Field label="Sub Category">
           <select
             value={subCategory}
-            onChange={(e) => setSubCategory(e.target.value)}
+            onChange={(e) => handleSubCategoryChange(e.target.value)}
             className={selectClass}
             required
           >
@@ -438,7 +461,7 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
             <h4 className="text-sm font-medium text-text-secondary">Items</h4>
             <button
               type="button"
-              onClick={() => setItems((prev) => [...prev, emptyItem()])}
+              onClick={() => setItems((prev) => [...prev, emptyItem(subCategory)])}
               className="text-sm text-accent hover:text-accent-hover cursor-pointer"
             >
               + Add item
@@ -503,6 +526,27 @@ export default function ReceiptForm({ metadata, onSaved, onClose }) {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
+                <Field label="Sub category" className="col-span-2 sm:col-span-5">
+                  <select
+                    value={it.subCategory || ''}
+                    onChange={(e) => updateItem(i, { subCategory: e.target.value })}
+                    className={selectClass}
+                    required
+                  >
+                    <option value="" disabled>
+                      Select a category
+                    </option>
+                    {expenseCategories.map((c) => (
+                      <option key={`${c.mainCategory}-${c.subCategory}`} value={c.subCategory}>
+                        {c.mainCategory} — {c.subCategory}
+                      </option>
+                    ))}
+                    {it.subCategory &&
+                    !expenseCategories.some((c) => c.subCategory === it.subCategory) ? (
+                      <option value={it.subCategory}>{it.subCategory}</option>
+                    ) : null}
+                  </select>
+                </Field>
               </div>
             ))}
           </div>

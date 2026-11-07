@@ -3,6 +3,7 @@ import Card from '../components/Card';
 import { inputClass } from '../components/FormField';
 import PageHeader, { PageActions } from '../components/PageHeader';
 import {
+  backfillItemSubcategories,
   backfillReceipts,
   exportManagement,
   fetchManagementSettings,
@@ -41,6 +42,8 @@ export default function Management() {
   const [exporting, setExporting] = useState(false);
   const [backfilling, setBackfilling] = useState(false);
   const [backfillSummary, setBackfillSummary] = useState(null);
+  const [backfillingSubs, setBackfillingSubs] = useState(false);
+  const [subcategorySummary, setSubcategorySummary] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [error, setError] = useState(null);
   const [syncMessage, setSyncMessage] = useState(null);
@@ -187,7 +190,38 @@ export default function Management() {
     }
   };
 
-  const busy = loading || syncing || exporting || savingSettings || backfilling;
+  const handleSubcategoryBackfill = async () => {
+    setBackfillingSubs(true);
+    setError(null);
+    setSubcategorySummary(null);
+    try {
+      const preview = await backfillItemSubcategories({ dryRun: true });
+      const willWrite = (preview.updated || 0) + (preview.repaired_from_sheet || 0);
+      if (!willWrite) {
+        setSubcategorySummary(preview);
+        return;
+      }
+      const confirmed = window.confirm(
+        `Fill ${preview.updated} blank receipt-item subcategor${preview.updated === 1 ? 'y' : 'ies'} from the transaction, and repair ${preview.repaired_from_sheet} already on the sheet? Cells that already have a subcategory are left as they are. The sheet is updated first.`
+      );
+      if (!confirmed) {
+        setSubcategorySummary(preview);
+        return;
+      }
+      const result = await backfillItemSubcategories({ dryRun: false });
+      setSubcategorySummary(result);
+      await loadStatus({ force: true });
+    } catch (err) {
+      setError(
+        err.message
+          || 'Subcategory backfill failed. Run it again to finish. A cell already written on the sheet is copied into Postgres.'
+      );
+    } finally {
+      setBackfillingSubs(false);
+    }
+  };
+
+  const busy = loading || syncing || exporting || savingSettings || backfilling || backfillingSubs;
   const overallStatus = !hasSheet
     ? 'checking'
     : loading
@@ -249,7 +283,10 @@ export default function Management() {
             <code className="text-xs">Transaction ID</code> column as the first column in{' '}
             <code className="text-xs">Transactions</code>. Add a{' '}
             <code className="text-xs">Receipt Item ID</code> column as the first column in{' '}
-            <code className="text-xs">Receipt_Items</code>.
+            <code className="text-xs">Receipt_Items</code>. Add{' '}
+            <code className="text-xs">Sub category</code> as column 7 of{' '}
+            <code className="text-xs">Receipt_Items</code>, immediately after{' '}
+            <code className="text-xs">Money</code>.
           </p>
           <div className="flex flex-col sm:flex-row gap-2">
             <input
@@ -302,6 +339,35 @@ export default function Management() {
               {backfillSummary.skipped_exchange ?? 0} Exchange (self),{' '}
               {backfillSummary.skipped_zero ?? 0} zero-amount,{' '}
               {backfillSummary.skipped_not_on_sheet ?? 0} not on the sheet.
+            </p>
+          )}
+        </div>
+      </Card>
+
+      <Card title="Receipt item subcategories">
+        <div className="space-y-3">
+          <p className="text-sm text-text-muted">
+            Copies the transaction subcategory into receipt items that are blank. Items that
+            already have a subcategory are left unchanged. Add the{' '}
+            <code className="text-xs">Sub category</code> column on Receipt_Items first. The sheet
+            is written first so Sync keeps the values.
+          </p>
+          <button
+            type="button"
+            onClick={handleSubcategoryBackfill}
+            disabled={busy || !hasSheet}
+            className="btn-secondary"
+          >
+            {backfillingSubs ? 'Backfilling…' : 'Backfill item subcategories'}
+          </button>
+          {subcategorySummary && (
+            <p className="text-sm text-text-secondary">
+              {subcategorySummary.dry_run ? 'Preview. ' : 'Finished. '}
+              Filled {subcategorySummary.updated ?? 0}, repaired {subcategorySummary.repaired_from_sheet ?? 0} from
+              the sheet. Skipped {subcategorySummary.skipped_already_set ?? 0} already set,{' '}
+              {subcategorySummary.skipped_blank_transaction ?? 0} with no transaction subcategory,{' '}
+              {subcategorySummary.skipped_unknown_category ?? 0} unknown categories,{' '}
+              {subcategorySummary.skipped_orphan ?? 0} without a receipt transaction.
             </p>
           )}
         </div>

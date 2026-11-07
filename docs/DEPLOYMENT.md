@@ -64,7 +64,7 @@ Transactions created before descriptions and automatic receipts were required ma
 New creates write the receipt line themselves. For rows already in the sheet, run the backfill once
 per user after this release. It is safe to run again: rows that already have a receipt are skipped.
 
-No new sheet columns. `Receipt` and `Receipt_Items` must already exist (they do on a sheet this app syncs).
+`Receipt_Items` must include `Sub category` as column 7, immediately after `Money`, before this command appends lines. See [receipt-item-subcategory.md](receipt-item-subcategory.md).
 
 **Hosted app (uses the signed-in Google session):** Management → Backfill receipt lines. The button
 previews counts, then writes. Blank descriptions are stored as `(no description)`.
@@ -90,7 +90,26 @@ Put `GOOGLE_ACCESS_TOKEN` in the environment, not after the command name. If the
 and Postgres does not, the command exits with an error. Run it again (it mirrors the sheet receipt)
 or use Management → Sync. Details: [transaction-receipts.md](transaction-receipts.md).
 
-## 6. Automatic deploys
+## 6. Backfill receipt item subcategories
+
+Receipt items created before subcategory lived on the line have a blank `Sub category` cell. Homepage monthly breakdown falls back to the transaction subcategory until that cell is filled. Run this once per user after adding the column. It is safe to run again: cells that already have a subcategory are not overwritten.
+
+**Hosted app:** Management → Backfill item subcategories. The button previews counts, then writes.
+
+**Shell against production data** (session pooler):
+
+```bash
+cd backend
+GOOGLE_ACCESS_TOKEN="<access token from a signed-in session>" \
+DATABASE_URL="<session pooler url>" \
+DJANGO_DEBUG=false \
+DJANGO_SECRET_KEY="<production secret, or any 32+ char string if you only run this command>" \
+python manage.py backfill_receipt_item_subcategories --dry-run --user-email you@example.com
+```
+
+Write the same way without `--dry-run`. Put `GOOGLE_ACCESS_TOKEN` in the environment, not after the command name. If the sheet write succeeds and Postgres does not, the command exits with an error. Run it again (it copies the sheet cell into Postgres). Details: [receipt-item-subcategory.md](receipt-item-subcategory.md).
+
+## 7. Automatic deploys
 
 The Vercel project deploys on every push to `main` (production) and on pull requests (preview). Each
 preview includes both Vite and Django on the same host.

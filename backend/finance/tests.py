@@ -10,6 +10,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from finance import oauth
+from finance.category_split import allocate_change
 from finance.db_reader import (
     ReaderError,
     get_dashboard_data,
@@ -1119,6 +1120,7 @@ class TransactionDetailTests(TestCase):
                     'amount': 2.0,
                     'unit': 'L',
                     'money': 4.5,
+                    'subCategory': '',
                 },
                 {
                     'id': str(bread.id),
@@ -1126,6 +1128,7 @@ class TransactionDetailTests(TestCase):
                     'amount': 1.0,
                     'unit': 'loaf',
                     'money': 8.0,
+                    'subCategory': '',
                 },
             ],
         )
@@ -2491,6 +2494,7 @@ class GiftcardDebitWriteTests(TestCase):
         self.assertEqual(receipt['items'][0]['name'], 'Milk')
         self.assertEqual(receipt['items'][0]['unit'], 'piece')
         self.assertEqual(receipt['items'][0]['amount'], Decimal('1'))
+        self.assertEqual(receipt['items'][0]['sub_category'], 'Groceries')
         self.assertEqual(receipt['total'], Decimal('10.00'))
 
 
@@ -3572,6 +3576,7 @@ class MemorySheet:
                         'Amount': values[3],
                         'Unit': values[4],
                         'Money': values[5],
+                        'Sub category': values[6] if len(values) > 6 else '',
                     }
                 )
         return [1]
@@ -3593,6 +3598,12 @@ class AutoReceiptWriteTests(TestCase):
             main_category='Earnings',
             sub_category='Salary',
             type='Income',
+        )
+        self.rent = Category.objects.create(
+            user=self.user,
+            main_category='Living',
+            sub_category='Rent',
+            type='Expense',
         )
         self.exchange = Category.objects.create(
             user=self.user,
@@ -3699,6 +3710,13 @@ class AutoReceiptWriteTests(TestCase):
         self.assertEqual(item.amount, Decimal('1'))
         self.assertEqual(item.unit, 'piece')
         self.assertEqual(item.money, Decimal('10.00'))
+        self.assertEqual(item.category.sub_category, 'Groceries')
+        item_rows = [
+            call.args[2][0]
+            for call in append_rows.call_args_list
+            if call.args[0] == settings.RECEIPT_ITEMS_TABLE
+        ]
+        self.assertEqual(item_rows[0][6], 'Groceries')
         receipt_tables = [call.args[0] for call in append_rows.call_args_list]
         self.assertEqual(
             receipt_tables,
@@ -3964,11 +3982,154 @@ class AutoReceiptWriteTests(TestCase):
         self.assertEqual(result['receiptId'], str(tx.receipt.id))
         self.assertEqual(tx.receipt.items.get().name, 'Use giftcard: Coles')
         self.assertEqual(tx.receipt.items.get().money, Decimal('12.50'))
+        self.assertEqual(tx.receipt.items.get().category.sub_category, 'Groceries')
         card.refresh_from_db()
         self.assertEqual(card.balance, Decimal('17.50'))
         dashboard = get_dashboard_data(user=self.user)
         self.assertEqual(dashboard['summary']['expense'], -12.5)
         self.assertEqual(dashboard['summary']['income'], 0.0)
+        groceries = {
+            row['subCategory']: row['amounts'] for row in dashboard['expenseBreakdown']
+        }
+        self.assertEqual(list(groceries), ['Groceries'])
+        self.assertEqual(sum(groceries['Groceries'].values()), -12.5)
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, '_sync_receipt_item_sheet_rows')
+    @patch.object(SheetsClient, 'find_matching_sheet_rows', return_value=[4])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'delete_funding_rows_for_transaction')
+    @patch.object(SheetsClient, 'update_table_row_at')
+    def test_edit_auto_receipt_subcategory_updates_the_line(
+        self, _update_row, _delete_funding, append_funding, _find, sync_items, _debits
+    ):
+        tx, _receipt, item = self._add_auto(
+            row=4, change='-8.50', comment='Milk', category=self.groceries
+        )
+        append_funding.return_value = self._funding(Decimal('8.50'), row=4)
+        self._client().update_transaction(
+            str(tx.id),
+            date='2026-01-08',
+            amount='8.50',
+            type='Expense',
+            sub_category='Rent',
+            comment='Milk',
+            payments=[{'source': 'Everyday', 'amount': '8.50'}],
+        )
+        tx.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(tx.category.sub_category, 'Rent')
+        self.assertEqual(tx.change, Decimal('-8.50'))
+        self.assertEqual(item.category.sub_category, 'Rent')
+        self.assertEqual(item.name, 'Milk')
+        self.assertEqual(sync_items.call_args.kwargs['items'][0]['sub_category'], 'Rent')
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, '_sync_receipt_item_sheet_rows')
+    @patch.object(SheetsClient, 'find_matching_sheet_rows', return_value=[4])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'delete_funding_rows_for_transaction')
+    @patch.object(SheetsClient, 'update_table_row_at')
+    def test_custom_item_subcategory_keeps_income_sign(
+        self, _update_row, _delete_funding, append_funding, _find, _sync_items, _debits
+    ):
+        bonus = Category.objects.create(
+            user=self.user,
+            main_category='Earnings',
+            sub_category='Bonus',
+            type='Income',
+        )
+        tx, _receipt, item = self._add_auto(
+            row=5, change='20.00', comment='Pay', category=self.salary
+        )
+        append_funding.return_value = self._funding(20, row=5)
+        self._client().update_transaction(
+            str(tx.id),
+            date='2026-01-08',
+            amount=20,
+            type='Income',
+            sub_category='Salary',
+            comment='Pay',
+            payments=[{'source': 'Everyday', 'amount': 20}],
+            items=[
+                {
+                    'id': str(item.id),
+                    'name': 'Pay',
+                    'amount': 1,
+                    'unit': 'piece',
+                    'money': 20,
+                    'subCategory': 'Bonus',
+                }
+            ],
+        )
+        tx.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(tx.change, Decimal('20'))
+        self.assertEqual(tx.category.sub_category, 'Salary')
+        self.assertEqual(item.category_id, bonus.id)
+        self.assertEqual(item.name, 'Pay')
+
+    @patch.object(SheetsClient, 'apply_giftcard_debits')
+    @patch.object(SheetsClient, '_sync_receipt_item_sheet_rows')
+    @patch.object(SheetsClient, 'find_matching_sheet_rows', return_value=[4])
+    @patch.object(SheetsClient, 'append_funding_rows')
+    @patch.object(SheetsClient, 'delete_funding_rows_for_transaction')
+    @patch.object(SheetsClient, 'update_table_row_at')
+    def test_itemised_lines_keep_their_subcategories(
+        self, _update_row, _delete_funding, append_funding, _find, _sync_items, _debits
+    ):
+        tx, receipt, milk = self._add_auto(
+            row=6, change='-8.00', comment='Milk', category=self.groceries
+        )
+        milk.category = self.groceries
+        milk.save(update_fields=['category'])
+        bread = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Bread',
+            amount=Decimal('1'),
+            unit='loaf',
+            money=Decimal('3.00'),
+            category=self.rent,
+        )
+        receipt.total = Decimal('11.00')
+        receipt.save(update_fields=['total'])
+        append_funding.return_value = self._funding(8, row=6)
+        self._client().update_transaction(
+            str(tx.id),
+            date='2026-01-08',
+            amount=8,
+            type='Expense',
+            sub_category='Rent',
+            comment='Shop',
+            payments=[{'source': 'Everyday', 'amount': 8}],
+            items=[
+                {
+                    'id': str(milk.id),
+                    'name': 'Milk',
+                    'amount': 1,
+                    'unit': 'L',
+                    'money': 5,
+                    'subCategory': 'Groceries',
+                },
+                {
+                    'id': str(bread.id),
+                    'name': 'Bread',
+                    'amount': 1,
+                    'unit': 'loaf',
+                    'money': 3,
+                    'subCategory': 'Rent',
+                },
+            ],
+        )
+        milk.refresh_from_db()
+        bread.refresh_from_db()
+        tx.refresh_from_db()
+        self.assertEqual(tx.category.sub_category, 'Rent')
+        self.assertEqual(tx.change, Decimal('-8.00'))
+        self.assertEqual(milk.category.sub_category, 'Groceries')
+        self.assertEqual(bread.category.sub_category, 'Rent')
+        self.assertEqual(milk.name, 'Milk')
 
 
 class ReceiptBackfillTests(TestCase):
@@ -4047,6 +4208,7 @@ class ReceiptBackfillTests(TestCase):
         self.assertEqual(item.amount, Decimal('1'))
         self.assertEqual(item.unit, 'piece')
         self.assertEqual(item.money, Decimal('8.50'))
+        self.assertEqual(item.category_id, self.groceries.id)
         self.assertEqual(item.receipt.total, Decimal('8.50'))
         second = self.run_backfill()
         self.assertEqual(second['created'], 0)
@@ -4236,3 +4398,500 @@ class ReceiptBackfillTests(TestCase):
                     self.user.email,
                 )
         self.assertEqual(Receipt.objects.filter(user=self.user).count(), 0)
+
+
+class CategorySplitTests(SimpleTestCase):
+    def test_scales_a_discount_and_puts_rounding_cents_on_the_transaction(self):
+        parts = allocate_change(
+            change=Decimal('-10.00'),
+            transaction_sub_category='Groceries',
+            transaction_type='Expense',
+            items=[
+                {'money': Decimal('10.00'), 'sub_category': 'Groceries', 'category_type': 'Expense'},
+                {'money': Decimal('0.03'), 'sub_category': 'Rent', 'category_type': 'Expense'},
+            ],
+        )
+        by_name = {name: amount for _type, name, amount in parts}
+        self.assertEqual(sum(by_name.values(), Decimal('0')), Decimal('-10.00'))
+        self.assertEqual(by_name['Rent'], Decimal('-0.02'))
+        self.assertEqual(by_name['Groceries'], Decimal('-9.98'))
+
+    def test_remainder_stays_on_the_transaction_subcategory(self):
+        parts = allocate_change(
+            change=Decimal('-10.00'),
+            transaction_sub_category='Groceries',
+            transaction_type='Expense',
+            items=[
+                {'money': Decimal('6.00'), 'sub_category': 'Rent', 'category_type': 'Expense'},
+            ],
+        )
+        by_name = {name: amount for _type, name, amount in parts}
+        self.assertEqual(by_name['Rent'], Decimal('-6.00'))
+        self.assertEqual(by_name['Groceries'], Decimal('-4.00'))
+
+    def test_blank_or_other_type_uses_the_transaction_subcategory(self):
+        parts = allocate_change(
+            change=Decimal('20.00'),
+            transaction_sub_category='Salary',
+            transaction_type='Income',
+            items=[
+                {'money': Decimal('20.00'), 'sub_category': 'Groceries', 'category_type': 'Expense'},
+            ],
+        )
+        self.assertEqual(parts, [('Income', 'Salary', Decimal('20.00'))])
+
+    def test_transfer_is_not_allocated(self):
+        self.assertEqual(
+            allocate_change(
+                change=Decimal('-5.00'),
+                transaction_sub_category='Exchange (self)',
+                transaction_type='',
+                items=[],
+            ),
+            [],
+        )
+
+
+
+class ReceiptItemSubcategoryTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='item-sub@example.com', sheet_id='sheet-item-sub')
+        self.other = User.objects.create(email='item-sub-other@example.com', sheet_id='sheet-other-sub')
+        self.source = Source.objects.create(user=self.user, name='Everyday', type='Bank')
+        self.groceries = Category.objects.create(
+            user=self.user, main_category='Living', sub_category='Groceries', type='Expense'
+        )
+        self.rent = Category.objects.create(
+            user=self.user, main_category='Living', sub_category='Rent', type='Expense'
+        )
+        self.salary = Category.objects.create(
+            user=self.user, main_category='Earnings', sub_category='Salary', type='Income'
+        )
+        self.exchange = Category.objects.create(
+            user=self.user, main_category='Transfer', sub_category='Exchange (self)', type=''
+        )
+        self.other_groceries = Category.objects.create(
+            user=self.other, main_category='Living', sub_category='Groceries', type='Expense'
+        )
+
+    def _tx(self, row, change, category, comment='Note'):
+        return Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=date(2026, 1, 8),
+            change=Decimal(change),
+            category=category,
+            comment=comment,
+        )
+
+    def _receipt(self, tx, items):
+        receipt = Receipt.objects.create(
+            user=self.user,
+            transaction=tx,
+            date=tx.date,
+            total=sum((Decimal(spec['money']) for spec in items), Decimal('0')),
+        )
+        created = []
+        for spec in items:
+            created.append(
+                ReceiptItem.objects.create(
+                    user=self.user,
+                    receipt=receipt,
+                    name=spec['name'],
+                    amount=Decimal(spec.get('amount', '1')),
+                    unit=spec.get('unit', 'piece'),
+                    money=Decimal(spec['money']),
+                    category=spec.get('category'),
+                )
+            )
+        return receipt, created
+
+    @patch('finance.db_reader.timezone.localdate', return_value=date(2026, 1, 15))
+    def test_dashboard_splits_items_and_matches_transaction_totals(self, _today):
+        self._tx(1, '100.00', self.salary, 'Pay')
+        shop = self._tx(2, '-10.00', self.groceries, 'Shop')
+        self._receipt(
+            shop,
+            [
+                {'name': 'Milk', 'money': '6.00', 'category': self.rent},
+                {'name': 'Bread', 'money': '2.50', 'category': self.groceries},
+            ],
+        )
+        plain = self._tx(3, '-4.00', self.rent, 'Rent')
+        buy = self._tx(4, '-20.00', self.exchange, 'Buy giftcard: Coles')
+        Payment.objects.create(
+            user=self.user, transaction=buy, source=self.source, amount=Decimal('20.00'), row_number=4
+        )
+        use = self._tx(5, '-20.00', self.groceries, 'Use giftcard: Coles')
+        card = Giftcard.objects.create(
+            user=self.user, row_number=1, shop='Coles', date=date(2026, 1, 5), balance=Decimal('0.00')
+        )
+        GiftcardPayment.objects.create(
+            user=self.user, transaction=use, giftcard=card, amount=Decimal('20.00'), row_number=1
+        )
+        self._receipt(
+            use,
+            [
+                {'name': 'Milk', 'money': '12.00', 'category': self.groceries},
+                {'name': 'Soap', 'money': '8.00', 'category': self.rent},
+            ],
+        )
+        Transaction.objects.create(
+            user=self.other,
+            row_number=1,
+            date=date(2026, 1, 8),
+            change=Decimal('-99.00'),
+            category=self.other_groceries,
+            comment='Other',
+        )
+
+        data = get_dashboard_data(user=self.user)
+        self.assertEqual(data['summary']['income'], 100.0)
+        self.assertEqual(data['summary']['expense'], -34.0)
+        expense = {row['subCategory']: row['amounts']['2026/01'] for row in data['expenseBreakdown']}
+        # Shop remainder 1.50 stays on Groceries. Giftcard buy is Exchange and is omitted.
+        # Giftcard use is one expense, split 12 / 8, not counted again via the giftcard payment.
+        self.assertEqual(expense['Groceries'], -16.0)
+        self.assertEqual(expense['Rent'], -18.0)
+        self.assertEqual(sum(expense.values()), data['summary']['expense'])
+        income = {row['subCategory']: row['amounts']['2026/01'] for row in data['incomeBreakdown']}
+        self.assertEqual(income['Salary'], 100.0)
+        self.assertEqual(sum(income.values()), data['summary']['income'])
+        self.assertTrue(plain.id)
+
+    def test_filters_stay_on_the_transaction_subcategory(self):
+        shop = self._tx(1, '-10.00', self.groceries, 'Shop')
+        self._receipt(shop, [{'name': 'Soap', 'money': '10.00', 'category': self.rent}])
+        groceries = get_transaction_data(user=self.user, categories=['Groceries'])
+        rent = get_transaction_data(user=self.user, categories=['Rent'])
+        self.assertEqual([row['id'] for row in groceries['rows']], [str(shop.id)])
+        self.assertEqual(rent['rows'], [])
+
+    def test_sync_reads_item_subcategory_and_rejects_unknown(self):
+        tx_id = uuid.uuid4()
+        receipt_id = uuid.uuid4()
+        milk_id = uuid.uuid4()
+        bread_id = uuid.uuid4()
+        client = MagicMock()
+        payload = sheet_mirror(
+            categories=[
+                {'Main Category': 'Living', 'Sub category': 'Groceries', 'Type': 'Expense'},
+                {'Main Category': 'Living', 'Sub category': 'Rent', 'Type': 'Expense'},
+            ],
+            sources=[{'Name': 'Everyday', 'Type': 'Bank'}],
+            transactions=[
+                {
+                    '__sheet_row': 2,
+                    'Transaction ID': str(tx_id),
+                    'Date': '2026-01-08',
+                    'Change': '-10',
+                    'Comment': 'Shop',
+                    'Sub category': 'Groceries',
+                }
+            ],
+            payments=[
+                {
+                    '__sheet_row': 2,
+                    'Payment ID': str(uuid.uuid4()),
+                    'Transaction ID': str(tx_id),
+                    'Source': 'Everyday',
+                    'Amount': '10',
+                }
+            ],
+            receipts=[
+                {
+                    'Receipt ID': str(receipt_id),
+                    'Transaction ID': str(tx_id),
+                    'Date': '2026-01-08',
+                    'Total': '10',
+                }
+            ],
+            receipt_items=[
+                {
+                    'Receipt Item ID': str(milk_id),
+                    'Receipt ID': str(receipt_id),
+                    'Name': 'Milk',
+                    'Amount': '1',
+                    'Unit': 'piece',
+                    'Money': '6',
+                    'Sub category': 'Rent',
+                },
+                {
+                    'Receipt Item ID': str(bread_id),
+                    'Receipt ID': str(receipt_id),
+                    'Name': 'Bread',
+                    'Amount': '1',
+                    'Unit': 'loaf',
+                    'Money': '4',
+                },
+            ],
+        )
+        client.get_mirror_source_rows.return_value = payload
+        result = sync_from_sheets(client, user=self.user)
+        self.assertEqual(result['inserted']['receipt_items'], 2)
+        self.assertEqual(ReceiptItem.objects.get(pk=milk_id).category.sub_category, 'Rent')
+        self.assertIsNone(ReceiptItem.objects.get(pk=bread_id).category_id)
+        export = get_export_payload(user=self.user)
+        self.assertEqual(export['receipt_items']['columns'][-1], 'Sub category')
+        exported = {row[0]: row[-1] for row in export['receipt_items']['rows']}
+        self.assertEqual(exported[str(milk_id)], 'Rent')
+        self.assertEqual(exported[str(bread_id)], '')
+
+        payload['receipt_items'][0]['Sub category'] = 'Missing'
+        with self.assertRaises(SyncError) as ctx:
+            sync_from_sheets(client, user=self.user)
+        self.assertIn('Missing', str(ctx.exception))
+        self.assertTrue(ReceiptItem.objects.filter(pk=milk_id).exists())
+
+
+class ItemSubcategoryBackfillTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(email='sub-bf@example.com', sheet_id='sheet-sub-bf')
+        self.other = User.objects.create(email='sub-bf-other@example.com', sheet_id='sheet-sub-bf-2')
+        self.groceries = Category.objects.create(
+            user=self.user, main_category='Living', sub_category='Groceries', type='Expense'
+        )
+        self.rent = Category.objects.create(
+            user=self.user, main_category='Living', sub_category='Rent', type='Expense'
+        )
+        self.sheet = _SubcategorySheet()
+
+    def make_pair(self, *, row, item_sub='', tx_sub='Groceries'):
+        category = Category.objects.get(user=self.user, sub_category=tx_sub)
+        tx = Transaction.objects.create(
+            user=self.user,
+            row_number=row,
+            date=date(2026, 1, 8),
+            change=Decimal('-8.50'),
+            category=category,
+            comment='Milk',
+        )
+        receipt = Receipt.objects.create(
+            user=self.user, transaction=tx, date=tx.date, total=Decimal('8.50')
+        )
+        item_category = None
+        if item_sub:
+            item_category = Category.objects.get(user=self.user, sub_category=item_sub)
+        item = ReceiptItem.objects.create(
+            user=self.user,
+            receipt=receipt,
+            name='Milk',
+            amount=Decimal('1'),
+            unit='piece',
+            money=Decimal('8.50'),
+            category=item_category,
+        )
+        self.sheet.transactions.append(
+            {
+                '__sheet_row': row,
+                'Transaction ID': str(tx.id),
+                'Date': '2026-01-08',
+                'Change': -8.5,
+                'Comment': 'Milk',
+                'Sub category': tx_sub,
+            }
+        )
+        self.sheet.receipts.append(
+            {
+                'Receipt ID': str(receipt.id),
+                'Transaction ID': str(tx.id),
+                'Date': '2026-01-08',
+                'Total': 8.5,
+            }
+        )
+        self.sheet.items.append(
+            {
+                '__sheet_row': 20 + row,
+                'Receipt Item ID': str(item.id),
+                'Receipt ID': str(receipt.id),
+                'Name': 'Milk',
+                'Amount': 1,
+                'Unit': 'piece',
+                'Money': 8.5,
+                'Sub category': item_sub,
+            }
+        )
+        return tx, item
+
+    def run_backfill(self, *, dry_run=False):
+        from finance.receipt_item_subcategory import backfill_receipt_item_subcategories
+
+        return backfill_receipt_item_subcategories(
+            user=self.user, client=self.sheet, dry_run=dry_run
+        )
+
+    def test_dry_run_then_write_is_idempotent_and_skips_other_users(self):
+        _tx, item = self.make_pair(row=2)
+        other_category = Category.objects.create(
+            user=self.other, main_category='Living', sub_category='Groceries', type='Expense'
+        )
+        other_tx = Transaction.objects.create(
+            user=self.other,
+            row_number=1,
+            date=date(2026, 1, 8),
+            change=Decimal('-1.00'),
+            category=other_category,
+            comment='Other',
+        )
+        other_receipt = Receipt.objects.create(
+            user=self.other, transaction=other_tx, date=other_tx.date, total=Decimal('1.00')
+        )
+        other_item = ReceiptItem.objects.create(
+            user=self.other,
+            receipt=other_receipt,
+            name='Other',
+            amount=Decimal('1'),
+            unit='piece',
+            money=Decimal('1.00'),
+        )
+        preview = self.run_backfill(dry_run=True)
+        self.assertEqual(preview['updated'], 1)
+        self.assertTrue(preview['dry_run'])
+        self.assertEqual(self.sheet.writes, [])
+        self.assertIsNone(item.category_id)
+
+        written = self.run_backfill()
+        self.assertEqual(written['updated'], 1)
+        item.refresh_from_db()
+        self.assertEqual(item.category_id, self.groceries.id)
+        self.assertEqual(self.sheet.items[0]['Sub category'], 'Groceries')
+        again = self.run_backfill()
+        self.assertEqual(again['updated'], 0)
+        self.assertEqual(again['skipped_already_set'], 1)
+        other_item.refresh_from_db()
+        self.assertIsNone(other_item.category_id)
+
+    def test_does_not_overwrite_a_subcategory_already_on_the_item(self):
+        _tx, item = self.make_pair(row=3, item_sub='Rent', tx_sub='Groceries')
+        summary = self.run_backfill()
+        self.assertEqual(summary['updated'], 0)
+        self.assertEqual(summary['skipped_already_set'], 1)
+        item.refresh_from_db()
+        self.assertEqual(item.category.sub_category, 'Rent')
+        self.assertEqual(self.sheet.items[0]['Sub category'], 'Rent')
+        self.assertEqual(self.sheet.writes, [])
+
+    def test_repairs_postgres_from_a_filled_sheet_cell(self):
+        _tx, item = self.make_pair(row=4, item_sub='Rent')
+        item.category = None
+        item.save(update_fields=['category'])
+        summary = self.run_backfill()
+        self.assertEqual(summary['repaired_from_sheet'], 1)
+        self.assertEqual(summary['updated'], 0)
+        item.refresh_from_db()
+        self.assertEqual(item.category.sub_category, 'Rent')
+        self.assertEqual(self.sheet.writes, [])
+
+    def test_sheet_write_then_postgres_failure_is_repaired_on_rerun(self):
+        from finance.receipt_item_subcategory import ItemSubcategoryBackfillError
+
+        _tx, item = self.make_pair(row=5)
+        with patch.object(ReceiptItem, 'save', side_effect=RuntimeError('postgres down')):
+            with self.assertRaises(ItemSubcategoryBackfillError):
+                self.run_backfill()
+        self.assertEqual(self.sheet.items[0]['Sub category'], 'Groceries')
+        item.refresh_from_db()
+        self.assertIsNone(item.category_id)
+        summary = self.run_backfill()
+        self.assertEqual(summary['repaired_from_sheet'], 1)
+        item.refresh_from_db()
+        self.assertEqual(item.category.sub_category, 'Groceries')
+
+    def test_missing_column_is_rejected_before_writes(self):
+        self.sheet.with_column = False
+        self.make_pair(row=6)
+        with self.assertRaises(SheetsError) as ctx:
+            self.run_backfill()
+        self.assertIn('Sub category', str(ctx.exception))
+        self.assertEqual(self.sheet.writes, [])
+
+    @patch('finance.api_views.oauth.get_finance_user')
+    @patch('finance.api_views.oauth.get_access_token', return_value='token')
+    @patch('finance.api_views.sheets_for')
+    def test_management_api_dry_run(self, sheets_for, _token, get_user):
+        get_user.return_value = self.user
+        sheets_for.return_value = self.sheet
+        self.make_pair(row=7)
+        response = self.client.post(
+            '/api/management/backfill-item-subcategories',
+            data={'dryRun': True},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body['dry_run'])
+        self.assertEqual(body['updated'], 1)
+        self.assertEqual(self.sheet.writes, [])
+
+    def test_management_api_requires_auth(self):
+        response = self.client.post(
+            '/api/management/backfill-item-subcategories',
+            data={'dryRun': True},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_command_dry_run_requires_token_and_email(self):
+        import os
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        self.make_pair(row=8)
+        with patch.dict(os.environ, {'GOOGLE_ACCESS_TOKEN': ''}, clear=False):
+            with self.assertRaises(CommandError) as ctx:
+                call_command(
+                    'backfill_receipt_item_subcategories',
+                    '--user-email',
+                    self.user.email,
+                )
+        self.assertIn('GOOGLE_ACCESS_TOKEN', str(ctx.exception))
+
+        with patch.dict(os.environ, {'GOOGLE_ACCESS_TOKEN': 'token'}):
+            with patch.object(SheetsClient, 'get_table', return_value=self.sheet.get_table('x')):
+                with patch.object(
+                    SheetsClient,
+                    'get_mirror_source_rows',
+                    return_value=self.sheet.get_mirror_source_rows(),
+                ):
+                    call_command(
+                        'backfill_receipt_item_subcategories',
+                        '--dry-run',
+                        '--user-email',
+                        self.user.email,
+                    )
+        self.assertIsNone(ReceiptItem.objects.get(receipt__transaction__row_number=8).category_id)
+
+
+class _SubcategorySheet:
+    def __init__(self):
+        self.with_column = True
+        self.transactions = []
+        self.receipts = []
+        self.items = []
+        self.writes = []
+
+    def get_table(self, _name):
+        columns = [
+            {'name': 'Receipt Item ID'},
+            {'name': 'Receipt ID'},
+            {'name': 'Name'},
+            {'name': 'Amount'},
+            {'name': 'Unit'},
+            {'name': 'Money'},
+        ]
+        if self.with_column:
+            columns.append({'name': 'Sub category'})
+        return {'columns': columns}
+
+    def get_mirror_source_rows(self):
+        return {
+            'transactions': self.transactions,
+            'receipts': self.receipts,
+            'receipt_items': self.items,
+        }
+
+    def update_table_cell_at_row(self, _table, *, sheet_row, update_column, new_value):
+        self.writes.append((sheet_row, update_column, new_value))
+        for row in self.items:
+            if row.get('__sheet_row') == sheet_row and update_column == 'Sub category':
+                row['Sub category'] = new_value

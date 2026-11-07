@@ -1,18 +1,19 @@
 import { DecimalInput, Field, inputClass, selectClass } from './FormField';
-import { formatAUD } from '../lib/transform';
+import { formatAUD, itemSubCategoryOrDefault } from '../lib/transform';
 
 const DEFAULT_UNITS = ['kg', 'g', 'ml', 'l', 'piece'];
 
-export const emptyReceiptItem = () => ({
+export const emptyReceiptItem = (subCategory = '') => ({
   key: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   id: '',
   name: '',
   amount: '',
   unit: 'piece',
   money: '',
+  subCategory: subCategory || '',
 });
 
-export function toReceiptItemForm(item) {
+export function toReceiptItemForm(item, fallbackSubCategory = '') {
   return {
     key: item.id || emptyReceiptItem().key,
     id: item.id || '',
@@ -20,10 +21,25 @@ export function toReceiptItemForm(item) {
     amount: item.amount == null || item.amount === '' ? '' : String(item.amount),
     unit: item.unit || 'piece',
     money: item.money == null || item.money === '' ? '' : String(item.money),
+    subCategory: itemSubCategoryOrDefault(item.subCategory, fallbackSubCategory),
   };
 }
 
-export default function ReceiptItemsEditor({ items, onChange, total }) {
+function optionsFor(categories, current) {
+  const list = [...(categories || [])];
+  if (current && !list.some((c) => c.subCategory === current)) {
+    list.unshift({ mainCategory: '', subCategory: current });
+  }
+  return list;
+}
+
+export default function ReceiptItemsEditor({
+  items,
+  onChange,
+  total,
+  categories = [],
+  defaultSubCategory = '',
+}) {
   const units = [...DEFAULT_UNITS];
   for (const it of items) {
     if (it.unit && !units.includes(it.unit)) units.push(it.unit);
@@ -39,7 +55,7 @@ export default function ReceiptItemsEditor({ items, onChange, total }) {
         <h4 className="text-sm font-medium text-text-secondary">Items</h4>
         <button
           type="button"
-          onClick={() => onChange([...items, emptyReceiptItem()])}
+          onClick={() => onChange([...items, emptyReceiptItem(defaultSubCategory)])}
           className="text-sm text-accent hover:text-accent-hover cursor-pointer min-h-11"
         >
           + Add item
@@ -104,6 +120,23 @@ export default function ReceiptItemsEditor({ items, onChange, total }) {
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
+            <Field label="Sub category" className="col-span-2 sm:col-span-5">
+              <select
+                value={it.subCategory || ''}
+                onChange={(e) => updateItem(i, { subCategory: e.target.value })}
+                className={selectClass}
+                required
+              >
+                <option value="" disabled>
+                  Select a category
+                </option>
+                {optionsFor(categories, it.subCategory).map((c) => (
+                  <option key={`${c.mainCategory}-${c.subCategory}`} value={c.subCategory}>
+                    {c.mainCategory ? `${c.mainCategory} — ${c.subCategory}` : c.subCategory}
+                  </option>
+                ))}
+              </select>
+            </Field>
           </div>
         ))}
       </div>

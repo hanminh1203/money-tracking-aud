@@ -15,7 +15,13 @@ import {
   getTransaction,
   updateTransaction,
 } from '../lib/api';
-import { formatAUD, formatDateShort, isAutoReceipt, parseDate } from '../lib/transform';
+import {
+  formatAUD,
+  formatDateShort,
+  isAutoReceipt,
+  nextItemsAfterSubCategoryChange,
+  parseDate,
+} from '../lib/transform';
 
 function BackLink() {
   return (
@@ -154,7 +160,9 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
   const [subCategory, setSubCategory] = useState(data.subCategory || '');
   const [comment, setComment] = useState(data.comment || '');
   const [items, setItems] = useState(
-    hasReceipt ? (data.receipt.items || []).map(toReceiptItemForm) : []
+    hasReceipt
+      ? (data.receipt.items || []).map((item) => toReceiptItemForm(item, data.subCategory || ''))
+      : []
   );
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState(null);
@@ -262,6 +270,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
             amount: it.amount === '' ? 0 : Number(it.amount),
             unit: it.unit,
             money: Number(it.money),
+            subCategory: it.subCategory || subCategory,
           }));
       }
       await updateTransaction(data.id, payload);
@@ -332,7 +341,11 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
             <Field label="Category">
               <select
                 value={subCategory}
-                onChange={(e) => setSubCategory(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setItems((prev) => nextItemsAfterSubCategoryChange(prev, subCategory, next));
+                  setSubCategory(next);
+                }}
                 className={selectClass}
                 required
               >
@@ -504,8 +517,8 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
             {autoReceipt && !showReceiptEditor && (
               <div className="space-y-2">
                 <p className="text-sm text-text-muted">
-                  One receipt line stays in sync with this description and amount (1 piece).
-                  Monthly totals still use the transaction amount once.
+                  One receipt line stays in sync with this description, amount, and sub category
+                  (1 piece). Monthly totals still use the transaction amount once.
                 </p>
                 <button
                   type="button"
@@ -513,7 +526,11 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                   onClick={() => {
                     setEditItems(true);
                     if (!items.length) {
-                      setItems((data.receipt.items || []).map(toReceiptItemForm));
+                      setItems(
+                        (data.receipt.items || []).map((item) =>
+                          toReceiptItemForm(item, subCategory)
+                        )
+                      );
                     }
                   }}
                 >
@@ -545,7 +562,7 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                 <p className="text-sm text-text-muted">No items</p>
                 <button
                   type="button"
-                  onClick={() => setItems([emptyReceiptItem()])}
+                  onClick={() => setItems([emptyReceiptItem(subCategory)])}
                   className="text-sm text-accent hover:text-accent-hover cursor-pointer"
                 >
                   + Add item
@@ -556,6 +573,8 @@ function TransactionEditForm({ data, metadata, onSaved, onUpdated }) {
                 items={items}
                 onChange={setItems}
                 total={itemsTotal}
+                categories={categoryOptions}
+                defaultSubCategory={subCategory}
               />
             )}
           </Card>

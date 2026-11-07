@@ -23,7 +23,7 @@ The assistant refuses to log a transaction until the message includes a descript
 Creating a transaction that is not already a receipt, and not `Exchange (self)`, also appends:
 
 - `Receipt`: same transaction id, same date, total = absolute transaction amount
-- `Receipt_Items`: name = description, amount = 1, unit = `piece`, money = that total
+- `Receipt_Items`: name = description, amount = 1, unit = `piece`, money = that total, sub category = the transaction sub category
 
 This is written to the sheet first, then to Postgres in the same database transaction as the
 transaction row. Redeeming a giftcard does this too, because that row is a purchase. A real receipt
@@ -74,7 +74,7 @@ session.
 - A sheet receipt with no items, or two receipt rows for one transaction, is skipped and counted. Fix those rows by hand, then run the command again.
 - If the sheet write succeeds and Postgres fails, the command exits non-zero. Run it again, or Sync.
 
-Run instructions for production are in [DEPLOYMENT.md](DEPLOYMENT.md). No new columns are required.
+Run instructions for production are in [DEPLOYMENT.md](DEPLOYMENT.md). New lines include `Sub category` on `Receipt_Items` (column 7, immediately after `Money`). Add that column before running this command if the sheet does not have it yet. See [receipt-item-subcategory.md](receipt-item-subcategory.md).
 
 ## How to update data on the Google Sheet
 
@@ -91,7 +91,7 @@ Expected headers, in this order:
 | --- | --- |
 | Transactions | `Transaction ID`, `Date`, `Change`, `Comment`, `Sub category` |
 | Receipt | `Receipt ID`, `Transaction ID`, `Date`, `Total` |
-| Receipt_Items | `Receipt Item ID`, `Receipt ID`, `Name`, `Amount`, `Unit`, `Money` |
+| Receipt_Items | `Receipt Item ID`, `Receipt ID`, `Name`, `Amount`, `Unit`, `Money`, `Sub category` |
 
 `Comment` is the description. `Change` stays signed. `Total` and `Money` are the absolute amount.
 
@@ -162,9 +162,9 @@ If **Comment** had been blank on both the sheet and in Postgres, that cell would
 
 **Receipt_Items**
 
-| Receipt Item ID | Receipt ID | Name | Amount | Unit | Money |
-| --- | --- | --- | --- | --- | --- |
-| `33333333-3333-3333-3333-333333333333` | `22222222-2222-2222-2222-222222222222` | Milk | 1 | piece | 8.50 |
+| Receipt Item ID | Receipt ID | Name | Amount | Unit | Money | Sub category |
+| --- | --- | --- | --- | --- | --- | --- |
+| `33333333-3333-3333-3333-333333333333` | `22222222-2222-2222-2222-222222222222` | Milk | 1 | piece | 8.50 | Groceries |
 
 Income is the same shape with a positive `Change`. A `+20.00` salary row gets `Total` `20.00` and `Money` `20.00`. `Change` stays positive.
 

@@ -73,7 +73,9 @@ def _index_sheet(source: dict) -> tuple[dict[uuid.UUID, dict], dict[uuid.UUID, d
 
     items_by_receipt: dict[uuid.UUID, list[dict]] = {}
     for index, row in enumerate(source.get('receipt_items') or []):
-        item_id, receipt_id, name, amount, unit, money = _parse_item_row(row, index)
+        item_id, receipt_id, name, amount, unit, money, sub_category = _parse_item_row(
+            row, index
+        )
         items_by_receipt.setdefault(receipt_id, []).append(
             {
                 'id': str(item_id),
@@ -81,6 +83,7 @@ def _index_sheet(source: dict) -> tuple[dict[uuid.UUID, dict], dict[uuid.UUID, d
                 'amount': amount,
                 'unit': unit,
                 'money': money,
+                'sub_category': sub_category,
             }
         )
 
@@ -205,10 +208,14 @@ def backfill_missing_receipts(
             continue
         try:
             _fill_blank_sheet_comment(client, sheet_tx, chosen)
+            chosen_sub = str(sheet_tx.get('sub_category') or '').strip()
+            if not chosen_sub and tx.category_id:
+                chosen_sub = tx.category.sub_category or ''
             payload = build_auto_receipt(
                 description=chosen,
                 money=sheet_tx['change'],
                 date=sheet_tx['date'].isoformat(),
+                sub_category=chosen_sub,
             )
             receipt_row, item_row = auto_receipt_sheet_rows(
                 payload, transaction_id=str(tx.id)

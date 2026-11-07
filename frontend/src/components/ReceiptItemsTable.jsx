@@ -13,6 +13,7 @@ export default function ReceiptItemsTable({ items = [], total }) {
             <th className="py-1.5 pr-2 font-medium">Name</th>
             <th className="py-1.5 px-2 font-medium text-right whitespace-nowrap">Amount</th>
             <th className="py-1.5 px-2 font-medium whitespace-nowrap">Unit</th>
+            <th className="py-1.5 px-2 font-medium whitespace-nowrap">Sub category</th>
             <th className="py-1.5 pl-2 font-medium text-right whitespace-nowrap">Money</th>
           </tr>
         </thead>
@@ -24,6 +25,7 @@ export default function ReceiptItemsTable({ items = [], total }) {
                 {it.amount != null && it.amount !== '' ? it.amount : '—'}
               </td>
               <td className="py-1.5 px-2 text-text-primary whitespace-nowrap">{it.unit || '—'}</td>
+              <td className="py-1.5 px-2 text-text-primary whitespace-nowrap">{it.subCategory || '—'}</td>
               <td className="py-1.5 pl-2 text-text-primary text-right tabular-money whitespace-nowrap">
                 {formatAUD(Number(it.money) || 0)}
               </td>

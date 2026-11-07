@@ -2,7 +2,8 @@
 
 The sheet column ``Comment`` is the transaction description. A synthetic receipt
 has one Receipt_Items row: name = description, amount = 1, unit = piece, money
-= abs(transaction change). Receipt total is that same absolute amount.
+= abs(transaction change), sub category = the transaction sub category. Receipt
+total is that same absolute amount.
 
 Dashboard income and expense sum ``Transaction.change`` by category type. They
 do not add receipt totals, so the extra row is not a second spend.
@@ -44,6 +45,19 @@ def money_amount(value: Any) -> Decimal:
     return amount
 
 
+def item_sub_category(item: Any) -> str:
+    """Sub category stored on a receipt line, or blank when it has none."""
+    if isinstance(item, dict):
+        return str(item.get('sub_category') or item.get('subCategory') or '').strip()
+    category_id = getattr(item, 'category_id', None)
+    if not category_id:
+        return ''
+    category = getattr(item, 'category', None)
+    if category is None:
+        return ''
+    return str(getattr(category, 'sub_category', '') or '').strip()
+
+
 def _item_fields(item: Any) -> tuple[str, Decimal, str, Decimal]:
     if isinstance(item, dict):
         name = item.get('name')
@@ -76,12 +90,24 @@ def _is_piece_line(item: Any, *, name: str, money: Any) -> bool:
     )
 
 
-def is_auto_receipt(*, comment: Any, change: Any, receipt_total: Any, items: Any) -> bool:
+def is_auto_receipt(
+    *,
+    comment: Any,
+    change: Any,
+    receipt_total: Any,
+    items: Any,
+    sub_category: Any = None,
+) -> bool:
     """True when the linked receipt is still the single synthetic line.
 
     Compared to the transaction as stored, not to an in-progress edit. A second
     line, a different unit, a renamed item, or money that no longer matches
     abs(change) means the user has edited the receipt.
+
+    ``sub_category`` is the transaction subcategory. A line that already has a
+    different subcategory has been categorised on its own and is no longer
+    rewritten from the transaction. A blank item subcategory still counts as
+    synthetic so an edit can fill it.
     """
     rows = list(items or [])
     if len(rows) != 1:
@@ -89,7 +115,13 @@ def is_auto_receipt(*, comment: Any, change: Any, receipt_total: Any, items: Any
     expected = str(comment or '').strip()
     if not _is_piece_line(rows[0], name=expected, money=change):
         return False
-    return abs(Decimal(str(receipt_total)) - money_amount(change)) <= Decimal('0.009')
+    if abs(Decimal(str(receipt_total)) - money_amount(change)) > Decimal('0.009'):
+        return False
+    if sub_category is None:
+        return True
+    item_sub = item_sub_category(rows[0])
+    expected_sub = str(sub_category or '').strip()
+    return not item_sub or item_sub == expected_sub
 
 
 def incoming_matches_line(items: Any, *, description: str, money: Any) -> bool:
@@ -99,7 +131,13 @@ def incoming_matches_line(items: Any, *, description: str, money: Any) -> bool:
     return _is_piece_line(rows[0], name=str(description or '').strip(), money=money)
 
 
-def build_auto_receipt(*, description: str, money: Any, date: str) -> dict:
+def build_auto_receipt(
+    *,
+    description: str,
+    money: Any,
+    date: str,
+    sub_category: str = '',
+) -> dict:
     """Payload stored on the sheet and in Postgres for one synthetic receipt."""
     total = money_amount(money)
     if total <= 0:
@@ -118,6 +156,7 @@ def build_auto_receipt(*, description: str, money: Any, date: str) -> dict:
                 'amount': Decimal('1'),
                 'unit': AUTO_RECEIPT_UNIT,
                 'money': total,
+                'sub_category': str(sub_category or '').strip(),
             }
         ],
     }
@@ -137,5 +176,6 @@ def auto_receipt_sheet_rows(
         1,
         AUTO_RECEIPT_UNIT,
         float(item['money']),
+        item.get('sub_category') or '',
     ]
     return receipt_row, item_row
