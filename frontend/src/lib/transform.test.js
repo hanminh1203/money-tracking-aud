@@ -1,6 +1,42 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { localDateIso } from './transform.js';
+import { isAutoReceipt, localDateIso } from './transform.js';
+
+test('isAutoReceipt matches a single 1 piece line named from the description', () => {
+  const tx = {
+    comment: 'Milk',
+    change: -4.5,
+    receipt: {
+      total: 4.5,
+      items: [{ name: 'Milk', amount: 1, unit: 'piece', money: 4.5 }],
+    },
+  };
+  assert.equal(isAutoReceipt(tx), true);
+  assert.equal(isAutoReceipt({ ...tx, comment: 'Bread' }), false);
+  assert.equal(
+    isAutoReceipt({
+      ...tx,
+      receipt: {
+        total: 4.5,
+        items: [
+          { name: 'Milk', amount: 1, unit: 'piece', money: 2 },
+          { name: 'Bread', amount: 1, unit: 'loaf', money: 2.5 },
+        ],
+      },
+    }),
+    false
+  );
+  assert.equal(
+    isAutoReceipt({
+      ...tx,
+      receipt: {
+        total: 4.5,
+        items: [{ name: 'Milk', amount: 2, unit: 'L', money: 4.5 }],
+      },
+    }),
+    false
+  );
+});
 
 test('localDateIso uses local calendar components, not UTC ISO slice', () => {
   const localMorning = new Date(2026, 8, 19, 4, 0, 0);

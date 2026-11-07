@@ -34,6 +34,9 @@ export default function ChatBot({ metadata, onSaved }) {
         if (!amount || !type || !source || !subCategory) {
           throw new Error('Could not extract amount, type, source, and category from that. Try being more specific.');
         }
+        if (!String(comment || '').trim()) {
+          throw new Error('A description is required. Include what the transaction was for, then try again.');
+        }
         await addTransaction({ date, amount, type, source, subCategory, comment });
         onSaved?.();
         setMessages((m) => [

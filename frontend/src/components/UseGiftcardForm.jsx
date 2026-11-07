@@ -92,6 +92,9 @@ export default function UseGiftcardForm({ giftcard, metadata, onSaved, onClose }
           onChange={(e) => setComment(e.target.value)}
           className={inputClass}
         />
+        <p className="text-sm text-text-muted mt-1.5">
+          Leave blank to record this as Use giftcard: {giftcard.shop}. The spend also gets one receipt line, unless the category is Exchange (self).
+        </p>
       </Field>
 
       <div className="flex flex-wrap items-center justify-end gap-2 pt-1">

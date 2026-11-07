@@ -399,6 +399,25 @@ def _create_payments(
     )
 
 
+def _insert_receipt(*, owner: User, transaction_id: uuid.UUID, receipt: dict) -> None:
+    """Insert Receipt + items for a transaction that is already in this atomic block."""
+    rid = uuid.UUID(str(receipt['receipt_id']))
+    Receipt.objects.create(
+        id=rid,
+        version=1,
+        user=owner,
+        transaction_id=transaction_id,
+        date=_parse_date(receipt.get('date')),
+        total=_dec(receipt['total']),
+    )
+    ReceiptItem.objects.bulk_create(
+        [
+            ReceiptItem(**_receipt_item_kwargs(owner=owner, receipt_id=rid, it=it))
+            for it in receipt['items']
+        ]
+    )
+
+
 def save_transaction_bundle(
     *,
     user: User,
@@ -411,8 +430,13 @@ def save_transaction_bundle(
     payments: list[dict] | None = None,
     giftcard_payments: list[dict] | None = None,
     giftcard_debits: list[dict] | None = None,
+    receipt: dict | None = None,
 ) -> None:
-    """Insert one Transaction with Payment and/or GiftcardPayment rows."""
+    """Insert one Transaction with funding rows and an optional receipt.
+
+    The receipt is in the same atomic write as the transaction. Receipt total
+    is absolute money and is not added to dashboard spend, which uses change.
+    """
     owner = _require_user(user)
     payment_rows = list(payments or [])
     giftcard_rows = list(giftcard_payments or [])
@@ -437,6 +461,8 @@ def save_transaction_bundle(
                 payments=payment_rows,
                 giftcard_payments=giftcard_rows,
             )
+            if receipt is not None:
+                _insert_receipt(owner=owner, transaction_id=tid, receipt=receipt)
             _apply_giftcard_balance_updates(owner=owner, giftcard_debits=giftcard_debits)
     except Exception as exc:
         logger.exception('Postgres dual-write failed for transaction bundle %s', tid)
@@ -638,8 +664,13 @@ def save_giftcard_use(
     row_number: int,
     transaction_id: Any = None,
     giftcard_payment: dict,
+    receipt: dict | None = None,
 ) -> None:
-    """Insert use Transaction with GiftcardPayment and update Giftcard.balance."""
+    """Insert use Transaction with GiftcardPayment and update Giftcard.balance.
+
+    Optional receipt is the same absolute-money line as a plain expense. Spend
+    stays on transaction.change; the receipt total is not summed again.
+    """
     owner = _require_user(user)
     try:
         gid = uuid.UUID(str(giftcard_id))
@@ -668,8 +699,44 @@ def save_giftcard_use(
                 payments=[],
                 giftcard_payments=[giftcard_payment],
             )
+            if receipt is not None:
+                _insert_receipt(owner=owner, transaction_id=tid, receipt=receipt)
     except Exception as exc:
         logger.exception('Postgres dual-write failed for giftcard use %s', giftcard_id)
+        raise DualWriteError() from exc
+
+
+def save_receipt_for_existing_transaction(
+    *,
+    user: User,
+    transaction: Transaction,
+    receipt: dict,
+    comment: str | None = None,
+) -> None:
+    """Attach a receipt that was already written to the sheet.
+
+    ``comment`` replaces a blank description (the backfill placeholder). A
+    transaction that already has a receipt is left unchanged so a re-run does
+    not insert a second line.
+    """
+    owner = _require_user(user)
+    try:
+        with db_transaction.atomic():
+            locked = Transaction.objects.select_for_update().get(
+                pk=transaction.id, user=owner
+            )
+            if comment is not None and locked.comment != comment:
+                locked.comment = comment
+                locked.version = (locked.version or 1) + 1
+                locked.save(update_fields=['comment', 'version'])
+            if Receipt.objects.filter(transaction=locked, user=owner).exists():
+                return
+            _insert_receipt(owner=owner, transaction_id=locked.id, receipt=receipt)
+    except Exception as exc:
+        logger.exception(
+            'Postgres dual-write failed attaching receipt to transaction %s',
+            transaction.id,
+        )
         raise DualWriteError() from exc
 
 

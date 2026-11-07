@@ -34,6 +34,7 @@ from .db_reader import (
     search_link_candidates,
 )
 from .db_sync import SyncError, compare_mirror, sync_from_sheets
+from .receipt_backfill import BackfillWriteError, backfill_missing_receipts
 from .db_writer import DualWriteError
 from .groq_client import GroqError, extract_receipt_from_image, parse_finance_message
 from .models import User
@@ -658,6 +659,42 @@ def management_sync(request: HttpRequest) -> JsonResponse:
     except SheetsError as exc:
         status = getattr(exc, 'status', None) or 502
         return json_error(str(exc), status=status)
+    return JsonResponse(result)
+
+
+def _parse_dry_run(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ('1', 'true', 'yes'):
+            return True
+        if normalized in ('0', 'false', 'no', ''):
+            return False
+    raise ValueError('dryRun must be a boolean')
+
+
+@require_POST
+@require_auth
+def management_backfill_receipts(request: HttpRequest) -> JsonResponse:
+    """Create missing one-line receipts on this user's sheet, then in Postgres."""
+    user: User = request.finance_user  # type: ignore[attr-defined]
+    try:
+        body = parse_json(request)
+        dry_run = _parse_dry_run(body.get('dryRun'))
+        result = backfill_missing_receipts(
+            user=user,
+            client=sheets_for(request),
+            dry_run=dry_run,
+        )
+    except BackfillWriteError as exc:
+        return JsonResponse({'error': str(exc), 'summary': exc.summary}, status=exc.status)
+    except SyncError as exc:
+        return json_error(str(exc))
+    except (ValueError, SheetsError, DualWriteError) as exc:
+        return json_sheets_write_error(exc)
     return JsonResponse(result)
 
 

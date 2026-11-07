@@ -11,6 +11,18 @@ from django.conf import settings
 from django.utils import timezone
 
 from finance import db_writer
+from finance.auto_receipt import (
+    AUTO_RECEIPT_UNIT,
+    EXCHANGE_SUB_CATEGORY,
+    DescriptionRequired,
+    auto_receipt_sheet_rows,
+    build_auto_receipt,
+    incoming_matches_line,
+    is_auto_receipt,
+    money_amount,
+    require_description,
+    should_attach_auto_receipt,
+)
 
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
@@ -43,7 +55,7 @@ PRODUCT_ITEM_COLUMNS = [
 ]
 GIFTCARD_SOURCE_NAME = 'Giftcard'
 # Cash↔cash transfers and cash→giftcard purchases (not an Expense).
-TRANSFER_SUB_CATEGORY = 'Exchange (self)'
+TRANSFER_SUB_CATEGORY = EXCHANGE_SUB_CATEGORY
 
 # Export column formats for Australian locale workbooks.
 EXPORT_AUD_CURRENCY = {'type': 'CURRENCY', 'pattern': '"$"#,##0.00'}
@@ -837,6 +849,23 @@ class SheetsClient:
         row_numbers = self.append_rows(settings.TRANSACTIONS_TABLE, INPUT_COLUMNS, [values])
         return row_numbers[0]
 
+    def append_auto_receipt(
+        self,
+        *,
+        transaction_id: str,
+        date: str,
+        description: str,
+        money: Any,
+    ) -> dict:
+        """Append one synthetic receipt and its single item. Sheet only."""
+        payload = build_auto_receipt(description=description, money=money, date=date)
+        receipt_row, item_row = auto_receipt_sheet_rows(
+            payload, transaction_id=transaction_id
+        )
+        self.append_rows(settings.RECEIPT_TABLE, RECEIPT_COLUMNS, [receipt_row])
+        self.append_rows(settings.RECEIPT_ITEMS_TABLE, RECEIPT_ITEM_COLUMNS, [item_row])
+        return payload
+
     def delete_funding_rows_for_transaction(self, transaction_id: str) -> None:
         tid = str(transaction_id or '').strip()
         if not tid:
@@ -1056,6 +1085,10 @@ class SheetsClient:
             raise SheetsError('Invalid amount')
         if not abs_amt:
             raise SheetsError('Invalid amount')
+        try:
+            note = require_description(comment)
+        except DescriptionRequired as exc:
+            raise SheetsError(str(exc)) from exc
         signed = -abs_amt if type == 'Expense' else abs_amt
         payment_rows, giftcard_rows = self._normalize_funding(
             amount=abs_amt,
@@ -1073,28 +1106,41 @@ class SheetsClient:
         giftcard_debits = self.plan_giftcard_debits(giftcard_rows)
 
         transaction_id = str(uuid.uuid4())
+        category = sub_category or ''
         row_number = self.append_transaction_row(
-            [transaction_id, date, signed, comment or '', sub_category or '']
+            [transaction_id, date, signed, note, category]
         )
         saved_payments, saved_giftcard_payments = self.append_funding_rows(
             transaction_id=transaction_id,
             payments=payment_rows,
             giftcard_payments=giftcard_rows,
         )
+        receipt = None
+        if should_attach_auto_receipt(category) and money_amount(abs_amt) > 0:
+            receipt = self.append_auto_receipt(
+                transaction_id=transaction_id,
+                date=date,
+                description=note,
+                money=abs_amt,
+            )
         self.apply_giftcard_debits(giftcard_debits)
         db_writer.save_transaction_bundle(
             user=self.user,
             date=date,
             change=signed,
-            comment=comment or '',
-            sub_category=sub_category or '',
+            comment=note,
+            sub_category=category,
             row_number=row_number,
             transaction_id=transaction_id,
             payments=saved_payments,
             giftcard_payments=saved_giftcard_payments,
             giftcard_debits=giftcard_debits,
+            receipt=receipt,
         )
-        return {'added': 1}
+        return {
+            'added': 1,
+            'receiptId': receipt['receipt_id'] if receipt else None,
+        }
 
     def add_transfer(
         self,
@@ -1115,7 +1161,9 @@ class SheetsClient:
             raise SheetsError('Both sources are required')
         if from_source == to_source:
             raise SheetsError('Source and destination must differ')
-        note = comment or 'Exchange'
+        # Blank transfer notes are stored as Exchange so both legs have a description.
+        # Neither leg gets a receipt: Exchange (self) is a move, not a purchase.
+        note = str(comment or '').strip() or 'Exchange'
         from_tx_id = str(uuid.uuid4())
         to_tx_id = str(uuid.uuid4())
         from_row = self.append_transaction_row(
@@ -1324,7 +1372,6 @@ class SheetsClient:
             raise SheetsError('Type must be Expense or Income')
         signed = -abs_amt if tx_type == 'Expense' else abs_amt
         category = str(sub_category or '').strip()
-        note = str(comment or '')
 
         try:
             tx = (
@@ -1336,7 +1383,13 @@ class SheetsClient:
         except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
             raise SheetsError('Transaction not found', status=404) from exc
 
+        try:
+            note = require_description(comment)
+        except DescriptionRequired as exc:
+            raise SheetsError(str(exc)) from exc
+
         from finance.models import Receipt as ReceiptModel
+        from finance.models import ReceiptItem
 
         try:
             linked_receipt = tx.receipt
@@ -1346,42 +1399,86 @@ class SheetsClient:
         normalized_items = None
         total = None
         if linked_receipt:
-            if items is None:
+            existing_items = list(
+                ReceiptItem.objects.filter(receipt=linked_receipt, user=self.user)
+            )
+            auto = is_auto_receipt(
+                comment=tx.comment,
+                change=tx.change,
+                receipt_total=linked_receipt.total,
+                items=existing_items,
+            )
+
+            def sync_auto_line() -> None:
+                nonlocal normalized_items, total
+                line_money = float(money_amount(abs_amt))
+                normalized_items = [
+                    {
+                        'id': str(existing_items[0].id),
+                        'name': note,
+                        'amount': 1,
+                        'unit': AUTO_RECEIPT_UNIT,
+                        'money': line_money,
+                    }
+                ]
+                total = line_money
+
+            if items is None and auto:
+                # Description and amount edits keep the single synthetic line in sync.
+                # Sign stays on the requested type so income is not flipped to an expense.
+                sync_auto_line()
+            elif items is None:
                 raise SheetsError('items are required for a receipt-linked transaction')
-            normalized_items = []
-            for i, it in enumerate(items):
-                name = str(it.get('name') or '').strip()
-                raw_amount = it.get('amount')
-                try:
-                    item_amount = float(raw_amount) if raw_amount not in (None, '') else 0.0
-                except (TypeError, ValueError):
-                    raise SheetsError(f'Item {i + 1}: invalid amount')
-                unit = str(it.get('unit') or '').strip()
-                try:
-                    money = abs(float(it.get('money')))
-                except (TypeError, ValueError):
-                    raise SheetsError(f'Item {i + 1}: invalid money')
-                if not name:
-                    raise SheetsError(f'Item {i + 1}: name is required')
-                if not unit:
-                    raise SheetsError(f'Item {i + 1}: unit is required')
-                if not money:
-                    raise SheetsError(f'Item {i + 1}: invalid money')
-                item_payload = {
-                    'name': name,
-                    'amount': item_amount,
-                    'unit': unit,
-                    'money': money,
-                }
-                item_id = str(it.get('id') or '').strip()
-                if item_id:
-                    item_payload['id'] = item_id
-                normalized_items.append(item_payload)
-            if not normalized_items:
-                raise SheetsError('At least one item is required')
-            total = round(sum(it['money'] for it in normalized_items) * 100) / 100
-            signed = -total
-            abs_amt = total
+            else:
+                normalized_items = []
+                for i, it in enumerate(items):
+                    name = str(it.get('name') or '').strip()
+                    raw_amount = it.get('amount')
+                    try:
+                        item_amount = float(raw_amount) if raw_amount not in (None, '') else 0.0
+                    except (TypeError, ValueError):
+                        raise SheetsError(f'Item {i + 1}: invalid amount')
+                    unit = str(it.get('unit') or '').strip()
+                    try:
+                        money = abs(float(it.get('money')))
+                    except (TypeError, ValueError):
+                        raise SheetsError(f'Item {i + 1}: invalid money')
+                    if not name:
+                        raise SheetsError(f'Item {i + 1}: name is required')
+                    if not unit:
+                        raise SheetsError(f'Item {i + 1}: unit is required')
+                    if not money:
+                        raise SheetsError(f'Item {i + 1}: invalid money')
+                    item_payload = {
+                        'name': name,
+                        'amount': item_amount,
+                        'unit': unit,
+                        'money': money,
+                    }
+                    item_id = str(it.get('id') or '').strip()
+                    if item_id:
+                        item_payload['id'] = item_id
+                    normalized_items.append(item_payload)
+                if not normalized_items:
+                    raise SheetsError('At least one item is required')
+                stale_auto_line = auto and (
+                    incoming_matches_line(
+                        normalized_items,
+                        description=str(tx.comment or '').strip(),
+                        money=tx.change,
+                    )
+                    or incoming_matches_line(
+                        normalized_items, description=note, money=abs_amt
+                    )
+                )
+                if stale_auto_line:
+                    sync_auto_line()
+                else:
+                    # A user-edited receipt defines the expense. Do not rename its lines
+                    # from the transaction description.
+                    total = round(sum(it['money'] for it in normalized_items) * 100) / 100
+                    signed = -total
+                    abs_amt = total
         elif items:
             raise SheetsError('This transaction is not linked to a receipt')
 
@@ -1804,6 +1901,15 @@ class SheetsClient:
             payments=[],
             giftcard_payments=[{'giftcard_id': gid, 'amount': abs_amt}],
         )
+        # A giftcard redemption is a purchase. Exchange (self) is not.
+        receipt = None
+        if should_attach_auto_receipt(category):
+            receipt = self.append_auto_receipt(
+                transaction_id=transaction_id,
+                date=date,
+                description=note,
+                money=abs_amt,
+            )
         self.update_table_cell_at_row(
             settings.GIFTCARD_TABLE,
             sheet_row=card.row_number,
@@ -1822,12 +1928,14 @@ class SheetsClient:
             row_number=tx_row_numbers[0],
             transaction_id=transaction_id,
             giftcard_payment=saved_giftcard_payments[0],
+            receipt=receipt,
         )
         return {
             'giftcardId': gid,
             'amount': abs_amt,
             'balance': new_balance,
             'transactions': 1,
+            'receiptId': receipt['receipt_id'] if receipt else None,
         }
 
     def add_product(self, *, name: str) -> dict:

@@ -97,6 +97,9 @@ export default function TransferForm({ metadata, balances, onSaved, onClose }) {
           onChange={(e) => setComment(e.target.value)}
           className={inputClass}
         />
+        <p className="text-sm text-text-muted mt-1.5">
+          Leave blank to record both sides as Exchange. Transfers do not create a receipt.
+        </p>
       </Field>
 
       {fromSource && fromSource === toSource && (

@@ -28,6 +28,11 @@ urlpatterns = [
     path('management/health', api_views.management_health, name='management_health'),
     path('management/status', api_views.management_status, name='management_status'),
     path('management/sync', api_views.management_sync, name='management_sync'),
+    path(
+        'management/backfill-receipts',
+        api_views.management_backfill_receipts,
+        name='management_backfill_receipts',
+    ),
     path('management/export', api_views.management_export, name='management_export'),
     path('management/settings', api_views.management_settings, name='management_settings'),
 ]

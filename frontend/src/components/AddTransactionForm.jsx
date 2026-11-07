@@ -85,9 +85,12 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
     payments.some((p) => p.source && Number(p.amount) > 0) ||
     giftcardPayments.some((p) => p.giftcardId && Number(p.amount) > 0);
 
+  const description = comment.trim();
+
   const canSubmit =
     amountValue > 0 &&
     subCategory &&
+    description &&
     hasFunding &&
     fundingMatch &&
     !giftcardOverBalance &&
@@ -130,6 +133,10 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
 
   async function handleSubmit(e) {
     e.preventDefault();
+    if (!comment.trim()) {
+      setStatus({ ok: false, msg: 'Description is required.' });
+      return;
+    }
     if (!canSubmit) return;
     const shouldClose = closeAfterRef.current;
     closeAfterRef.current = false;
@@ -152,7 +159,7 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
         payments: paymentRows,
         giftcardPayments: giftcardRows,
         subCategory,
-        comment,
+        comment: comment.trim(),
       });
       setStatus({ ok: true, msg: 'Transaction added.' });
       onSaved?.();
@@ -359,14 +366,18 @@ export default function AddTransactionForm({ metadata, onSaved, onClose }) {
         </p>
       )}
 
-      <Field label="Comment (optional)">
+      <Field label="Description">
         <input
           type="text"
           placeholder="e.g. Woolworths groceries"
           value={comment}
           onChange={(e) => setComment(e.target.value)}
           className={inputClass}
+          required
         />
+        <p className="text-sm text-text-muted mt-1.5">
+          Required. Saved as the sheet comment and as one receipt line: this name, quantity 1 piece, and this amount.
+        </p>
       </Field>
 
       <div className="flex flex-wrap items-center justify-end gap-2 pt-1">

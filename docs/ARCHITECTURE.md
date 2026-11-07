@@ -64,6 +64,11 @@ For operations that change sheet data:
 If step 2 fails after step 1 succeeds, the API must surface an error (dual-write failure), not a 200. Tests in
 `finance/tests.py` cover this contract for creates and deletes/updates where implemented.
 
+Plain transactions require a description (the sheet `Comment`). Creating one without a receipt also writes
+a one-line receipt (name = description, quantity 1 piece, money = absolute transaction amount) to the sheet
+and Postgres in the same dual-write. Dashboard spend still sums `Transaction.change` only, so the receipt
+is not a second count. See [transaction-receipts.md](transaction-receipts.md).
+
 Some entities (e.g. products) may be Postgres-first or sheet-backed depending on the endpoint; follow existing
 patterns in `api_views.py` and `sheets_client.py` when extending.
 
