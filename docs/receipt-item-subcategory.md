@@ -30,7 +30,7 @@ The header is exactly `Sub category` (capital S, lowercase c), the same spelling
 
 Column 7 sits immediately after `Money`. The seven named columns must be one contiguous block. A column between them makes an append fail. The value must match a `Sub category` on the `Category` tab for that user. A blank cell is allowed. The homepage treats a blank line as the transaction subcategory, so totals stay correct until the cell is filled.
 
-The app cannot create the column on a user-managed sheet. Migrate the sheet by hand. There is no backfill command for this column.
+The app cannot create the column on a user-managed sheet. Add it and fill it by hand. There is no backfill command.
 
 ## Homepage monthly breakdown
 

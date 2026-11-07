@@ -70,7 +70,7 @@ class ReceiptItem(AuditedModel):
     amount = models.DecimalField(max_digits=14, decimal_places=4)
     unit = models.CharField(max_length=64)
     money = models.DecimalField(max_digits=14, decimal_places=2)
-    # Blank until backfill. The transaction category stays the default/primary.
+    # Blank until set. The transaction category stays the default/primary.
     category = models.ForeignKey(
         'Category',
         on_delete=models.PROTECT,

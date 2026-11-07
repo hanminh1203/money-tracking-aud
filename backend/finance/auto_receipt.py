@@ -18,9 +18,6 @@ from typing import Any
 # Cash transfers and giftcard purchases. Not a purchase, so no synthetic receipt.
 EXCHANGE_SUB_CATEGORY = 'Exchange (self)'
 AUTO_RECEIPT_UNIT = 'piece'
-# Blank historical comments cannot be a receipt item name. Written onto the
-# transaction as well so the line stays recognisable as synthetic.
-MISSING_DESCRIPTION = '(no description)'
 
 
 class DescriptionRequired(ValueError):

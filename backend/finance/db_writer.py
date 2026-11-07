@@ -713,40 +713,6 @@ def save_giftcard_use(
         raise DualWriteError() from exc
 
 
-def save_receipt_for_existing_transaction(
-    *,
-    user: User,
-    transaction: Transaction,
-    receipt: dict,
-    comment: str | None = None,
-) -> None:
-    """Attach a receipt that was already written to the sheet.
-
-    ``comment`` replaces a blank description (the backfill placeholder). A
-    transaction that already has a receipt is left unchanged so a re-run does
-    not insert a second line.
-    """
-    owner = _require_user(user)
-    try:
-        with db_transaction.atomic():
-            locked = Transaction.objects.select_for_update().get(
-                pk=transaction.id, user=owner
-            )
-            if comment is not None and locked.comment != comment:
-                locked.comment = comment
-                locked.version = (locked.version or 1) + 1
-                locked.save(update_fields=['comment', 'version'])
-            if Receipt.objects.filter(transaction=locked, user=owner).exists():
-                return
-            _insert_receipt(owner=owner, transaction_id=locked.id, receipt=receipt)
-    except Exception as exc:
-        logger.exception(
-            'Postgres dual-write failed attaching receipt to transaction %s',
-            transaction.id,
-        )
-        raise DualWriteError() from exc
-
-
 def plan_giftcard_credits(
     *,
     user: User,

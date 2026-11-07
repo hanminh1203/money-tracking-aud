@@ -58,37 +58,9 @@ Vercel and the migrate workflow start on the same push. For a schema change that
 request can briefly arrive before the migration finishes. Make migrations backwards compatible
 (add nullable columns first, remove columns in a later release).
 
-## 5. Backfill receipt lines for existing transactions
+## 5. Existing transactions without a receipt
 
-Transactions created before descriptions and automatic receipts were required may have no receipt.
-New creates write the receipt line themselves. For rows already in the sheet, run the backfill once
-per user after this release. It is safe to run again: rows that already have a receipt are skipped.
-
-`Receipt_Items` must include `Sub category` as column 7, immediately after `Money`, before this command appends lines. See [receipt-item-subcategory.md](receipt-item-subcategory.md).
-
-**Hosted app (uses the signed-in Google session):** Management → Backfill receipt lines. The button
-previews counts, then writes. Blank descriptions are stored as `(no description)`.
-
-**Shell against production data** (session pooler, not the transaction pooler):
-
-```bash
-cd backend
-GOOGLE_ACCESS_TOKEN="<access token from a signed-in session>" \
-DATABASE_URL="<session pooler url>" \
-DJANGO_DEBUG=false \
-DJANGO_SECRET_KEY="<production secret, or any 32+ char string if you only run this command>" \
-python manage.py backfill_transaction_receipts --dry-run --user-email you@example.com
-
-GOOGLE_ACCESS_TOKEN="<access token>" \
-DATABASE_URL="<session pooler url>" \
-DJANGO_DEBUG=false \
-DJANGO_SECRET_KEY="<same as above>" \
-python manage.py backfill_transaction_receipts --user-email you@example.com
-```
-
-Put `GOOGLE_ACCESS_TOKEN` in the environment, not after the command name. If the sheet write succeeds
-and Postgres does not, the command exits with an error. Run it again (it mirrors the sheet receipt)
-or use Management → Sync. Details: [transaction-receipts.md](transaction-receipts.md).
+New creates still write a one-line receipt. Transactions already on the sheet that have no receipt are not backfilled. Add the `Receipt` and `Receipt_Items` rows on the Google Sheet yourself, then **Management → Sync**. Sync reloads Postgres from the sheet. Details: [transaction-receipts.md](transaction-receipts.md).
 
 ## 6. Receipt item subcategories
 
