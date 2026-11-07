@@ -27,12 +27,14 @@ from finance.auto_receipt import (
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
 TRANSACTION_ID_COLUMN = 'Transaction ID'
+# Same header as Transactions. Readers also accept "Sub Category".
+SUB_CATEGORY_COLUMN = 'Sub category'
 INPUT_COLUMNS = [
     TRANSACTION_ID_COLUMN,
     'Date',
     'Change',
     'Comment',
-    'Sub category',
+    SUB_CATEGORY_COLUMN,
 ]
 PAYMENT_COLUMNS = ['Payment ID', 'Transaction ID', 'Source', 'Amount']
 GIFTCARD_PAYMENT_COLUMNS = [
@@ -42,7 +44,16 @@ GIFTCARD_PAYMENT_COLUMNS = [
     'Amount',
 ]
 RECEIPT_COLUMNS = ['Receipt ID', 'Transaction ID', 'Date', 'Total']
-RECEIPT_ITEM_COLUMNS = ['Receipt Item ID', 'Receipt ID', 'Name', 'Amount', 'Unit', 'Money']
+# Column 7, immediately after Money. These seven names must be one contiguous block.
+RECEIPT_ITEM_COLUMNS = [
+    'Receipt Item ID',
+    'Receipt ID',
+    'Name',
+    'Amount',
+    'Unit',
+    'Money',
+    SUB_CATEGORY_COLUMN,
+]
 GIFTCARD_COLUMNS = ['Giftcard ID', 'Shop', 'Date', 'Balance']
 PRODUCT_COLUMNS = ['Product ID', 'Name']
 PRODUCT_ITEM_COLUMNS = [
@@ -107,6 +118,25 @@ class SheetsError(Exception):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status
+
+
+def receipt_item_sub_category(item: dict, fallback: str = '') -> str:
+    """Item subcategory, or the transaction subcategory when the item omits one."""
+    text = str(item.get('subCategory') or item.get('sub_category') or '').strip()
+    return text or str(fallback or '').strip()
+
+
+def receipt_item_sheet_row(receipt_id: str, item: dict) -> list:
+    """Receipt_Items values in ``RECEIPT_ITEM_COLUMNS`` order."""
+    return [
+        item['id'],
+        receipt_id,
+        item['name'],
+        item['amount'],
+        item['unit'],
+        item['money'],
+        item.get('sub_category') or '',
+    ]
 
 
 def parse_amount(val: Any) -> float:
@@ -708,6 +738,7 @@ class SheetsClient:
                 'Amount': it['amount'],
                 'Unit': it['unit'],
                 'Money': it['money'],
+                SUB_CATEGORY_COLUMN: it.get('sub_category') or '',
             }
             if sheet_row is not None:
                 self.update_table_row_at(
@@ -716,16 +747,7 @@ class SheetsClient:
                     values_by_column=values_by_column,
                 )
             else:
-                to_append.append(
-                    [
-                        item_id,
-                        rid,
-                        it['name'],
-                        it['amount'],
-                        it['unit'],
-                        it['money'],
-                    ]
-                )
+                to_append.append(receipt_item_sheet_row(rid, {**it, 'id': item_id}))
         if to_append:
             self.append_rows(
                 settings.RECEIPT_ITEMS_TABLE,
@@ -856,9 +878,15 @@ class SheetsClient:
         date: str,
         description: str,
         money: Any,
+        sub_category: str = '',
     ) -> dict:
         """Append one synthetic receipt and its single item. Sheet only."""
-        payload = build_auto_receipt(description=description, money=money, date=date)
+        payload = build_auto_receipt(
+            description=description,
+            money=money,
+            date=date,
+            sub_category=sub_category,
+        )
         receipt_row, item_row = auto_receipt_sheet_rows(
             payload, transaction_id=transaction_id
         )
@@ -1122,6 +1150,7 @@ class SheetsClient:
                 date=date,
                 description=note,
                 money=abs_amt,
+                sub_category=category,
             )
         self.apply_giftcard_debits(giftcard_debits)
         db_writer.save_transaction_bundle(
@@ -1247,6 +1276,9 @@ class SheetsClient:
             if not money:
                 raise SheetsError(f'Item {i + 1}: invalid money')
             item_id = str(it.get('id') or '').strip() or str(uuid.uuid4())
+            item_sub = receipt_item_sub_category(it, sub_category)
+            if not item_sub:
+                raise SheetsError(f'Item {i + 1}: sub category is required')
             normalized_items.append(
                 {
                     'id': item_id,
@@ -1254,6 +1286,7 @@ class SheetsClient:
                     'amount': amount,
                     'unit': unit,
                     'money': money,
+                    'sub_category': item_sub,
                 }
             )
 
@@ -1301,10 +1334,7 @@ class SheetsClient:
         self.append_rows(
             settings.RECEIPT_ITEMS_TABLE,
             RECEIPT_ITEM_COLUMNS,
-            [
-                [it['id'], receipt_id, it['name'], it['amount'], it['unit'], it['money']]
-                for it in normalized_items
-            ],
+            [receipt_item_sheet_row(receipt_id, it) for it in normalized_items],
         )
         saved_payments, saved_giftcard_payments = self.append_funding_rows(
             transaction_id=transaction_id,
@@ -1376,7 +1406,7 @@ class SheetsClient:
         try:
             tx = (
                 Transaction.objects.filter(user=self.user)
-                .select_related('receipt')
+                .select_related('receipt', 'category')
                 .prefetch_related('payments__source', 'giftcard_payments__giftcard')
                 .get(pk=tid)
             )
@@ -1400,18 +1430,33 @@ class SheetsClient:
         total = None
         if linked_receipt:
             existing_items = list(
-                ReceiptItem.objects.filter(receipt=linked_receipt, user=self.user)
+                ReceiptItem.objects.filter(receipt=linked_receipt, user=self.user).select_related(
+                    'category'
+                )
             )
-            auto = is_auto_receipt(
+            stored_sub = (tx.category.sub_category or '').strip() if tx.category_id else ''
+            # Shape only: one piece line matching the stored description and amount.
+            shape_auto = is_auto_receipt(
                 comment=tx.comment,
                 change=tx.change,
                 receipt_total=linked_receipt.total,
                 items=existing_items,
             )
+            # Subcategory still follows the transaction (blank counts as not yet set).
+            auto = is_auto_receipt(
+                comment=tx.comment,
+                change=tx.change,
+                receipt_total=linked_receipt.total,
+                items=existing_items,
+                sub_category=stored_sub,
+            )
 
-            def sync_auto_line() -> None:
+            def sync_auto_line(*, item_sub: str | None = None) -> None:
                 nonlocal normalized_items, total
                 line_money = float(money_amount(abs_amt))
+                chosen = category if item_sub is None else str(item_sub or '').strip()
+                if not chosen:
+                    raise SheetsError('Sub category is required')
                 normalized_items = [
                     {
                         'id': str(existing_items[0].id),
@@ -1419,13 +1464,14 @@ class SheetsClient:
                         'amount': 1,
                         'unit': AUTO_RECEIPT_UNIT,
                         'money': line_money,
+                        'sub_category': chosen,
                     }
                 ]
                 total = line_money
 
             if items is None and auto:
-                # Description and amount edits keep the single synthetic line in sync.
-                # Sign stays on the requested type so income is not flipped to an expense.
+                # Description, amount, and subcategory stay in sync while the
+                # line has not been itemised. Sign stays on the requested type.
                 sync_auto_line()
             elif items is None:
                 raise SheetsError('items are required for a receipt-linked transaction')
@@ -1449,11 +1495,15 @@ class SheetsClient:
                         raise SheetsError(f'Item {i + 1}: unit is required')
                     if not money:
                         raise SheetsError(f'Item {i + 1}: invalid money')
+                    item_sub = receipt_item_sub_category(it, category)
+                    if not item_sub:
+                        raise SheetsError(f'Item {i + 1}: sub category is required')
                     item_payload = {
                         'name': name,
                         'amount': item_amount,
                         'unit': unit,
                         'money': money,
+                        'sub_category': item_sub,
                     }
                     item_id = str(it.get('id') or '').strip()
                     if item_id:
@@ -1461,18 +1511,25 @@ class SheetsClient:
                     normalized_items.append(item_payload)
                 if not normalized_items:
                     raise SheetsError('At least one item is required')
-                stale_auto_line = auto and (
-                    incoming_matches_line(
-                        normalized_items,
-                        description=str(tx.comment or '').strip(),
-                        money=tx.change,
-                    )
-                    or incoming_matches_line(
-                        normalized_items, description=note, money=abs_amt
-                    )
+                matches_shape = incoming_matches_line(
+                    normalized_items,
+                    description=str(tx.comment or '').strip(),
+                    money=tx.change,
+                ) or incoming_matches_line(
+                    normalized_items, description=note, money=abs_amt
                 )
-                if stale_auto_line:
-                    sync_auto_line()
+                if auto and matches_shape:
+                    submitted = normalized_items[0].get('sub_category') or ''
+                    if submitted and submitted != category:
+                        # The line is still synthetic, but this save assigns its
+                        # own subcategory. Keep the requested income/expense sign.
+                        sync_auto_line(item_sub=submitted)
+                    else:
+                        sync_auto_line()
+                elif shape_auto and matches_shape:
+                    # Subcategory was already set on the line. Do not rewrite the
+                    # line from the description, and do not flip the sign.
+                    total = round(sum(it['money'] for it in normalized_items) * 100) / 100
                 else:
                     # A user-edited receipt defines the expense. Do not rename its lines
                     # from the transaction description.
@@ -1909,6 +1966,7 @@ class SheetsClient:
                 date=date,
                 description=note,
                 money=abs_amt,
+                sub_category=category,
             )
         self.update_table_cell_at_row(
             settings.GIFTCARD_TABLE,

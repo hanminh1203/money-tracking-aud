@@ -124,22 +124,25 @@ def extract_receipt_from_image(image_data_url: str, metadata: dict) -> dict:
     expense_categories = [
         c for c in (metadata.get('categories') or []) if c.get('type') == 'Expense'
     ]
-    category_list = [f"{c['mainCategory']} > {c['subCategory']}" for c in expense_categories]
     today = timezone.localdate().isoformat()
 
     system_prompt = f"""You extract structured receipt data from a receipt photo.
 Return ONLY valid JSON matching this schema:
 {{
   "store": "string",
-  "date": "YYYY-MM-DD"
-  "items": [{{"name": "string", "amount": 1, "money": number}}]
+  "date": "YYYY-MM-DD",
+  "subCategory": "string",
+  "items": [{{"name": "string", "amount": 1, "money": number, "subCategory": "string"}}]
 }}
 
 Today's date is {today}. Use it only if the receipt date is unreadable.
+Expense subcategories (use the subcategory name exactly): {', '.join(c['subCategory'] for c in expense_categories) or '(none)'}.
 
 Rules:
 - Read every purchasable line item.
 - items[].money is the line price paid (positive number).
+- items[].subCategory is one of the expense subcategories when the line is obviously that category, otherwise "".
+- subCategory is the receipt's default expense subcategory, one of the expense subcategories, or "".
 - store: merchant name as printed.
 - All money fields are positive numbers."""
     parsed = _chat(
@@ -174,11 +177,13 @@ Rules:
         amount_raw = it.get('amount')
         amount = '' if amount_raw == '' or amount_raw is None else str(amount_raw)
         name = str(it.get('name') or '').strip()
+        item_sub = str(it.get('subCategory') or '').strip()
         item = {
             'name': name,
             'amount': amount,
             'unit': normalize_unit(it.get('unit')),
             'money': money,
+            'subCategory': item_sub if item_sub in allowed_subs else '',
         }
         if item['name'] or item['money']:
             items.append(item)

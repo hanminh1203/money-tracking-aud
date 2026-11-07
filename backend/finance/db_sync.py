@@ -48,7 +48,7 @@ FP_FIELDS: dict[str, tuple[str, ...]] = {
     'payment': ('id', 'transaction_id', 'source', 'amount'),
     'giftcard_payment': ('id', 'transaction_id', 'giftcard_id', 'amount'),
     'receipt': ('id', 'transaction_id', 'date', 'total'),
-    'receipt_items': ('id', 'receipt_id', 'name', 'amount', 'unit', 'money'),
+    'receipt_items': ('id', 'receipt_id', 'name', 'amount', 'unit', 'money', 'sub_category'),
     'giftcards': ('row_number', 'id', 'shop', 'date', 'balance'),
     'products': ('id', 'name'),
     'product_items': (
@@ -120,6 +120,7 @@ def _item_fp(
     amount: Decimal,
     unit: str,
     money: Decimal,
+    sub_category: str = '',
 ) -> tuple:
     return (
         str(item_id),
@@ -128,6 +129,7 @@ def _item_fp(
         _fp_dec(amount),
         str(unit or '').strip(),
         _fp_dec(money),
+        str(sub_category or '').strip(),
     )
 
 
@@ -209,7 +211,7 @@ def _parse_receipt_row(
 
 def _parse_item_row(
     row: dict, index: int
-) -> tuple[uuid.UUID, uuid.UUID, str, Decimal, str, Decimal]:
+) -> tuple[uuid.UUID, uuid.UUID, str, Decimal, str, Decimal, str]:
     try:
         rid = _optional_uuid(_cell(row, 'Receipt ID'))
         if rid is None:
@@ -220,6 +222,8 @@ def _parse_item_row(
         unit = str(_cell(row, 'Unit') or '').strip()
         amount = _sheet_dec(_cell(row, 'Amount'))
         money = _sheet_dec(_cell(row, 'Money'))
+        # Header is "Sub category" (same as Transactions). "Sub Category" is accepted.
+        sub_category = str(_cell(row, 'Sub category', 'Sub Category') or '').strip()
         item_id = receipt_item_id_for_row(
             item_id=_cell(row, 'Receipt Item ID'),
             receipt_id=rid,
@@ -228,7 +232,7 @@ def _parse_item_row(
             unit=unit,
             money=money,
         )
-        return (item_id, rid, name, amount, unit, money)
+        return (item_id, rid, name, amount, unit, money, sub_category)
     except ValueError as exc:
         raise SyncError(f'Receipt item row {index + 1}: {exc}') from exc
 
@@ -507,8 +511,16 @@ def _db_fingerprints(*, user: User) -> dict[str, list[tuple]]:
         for r in Receipt.objects.filter(user=user).iterator()
     ]
     items = [
-        _item_fp(it.id, it.receipt_id, it.name, it.amount, it.unit, it.money)
-        for it in ReceiptItem.objects.filter(user=user).iterator()
+        _item_fp(
+            it.id,
+            it.receipt_id,
+            it.name,
+            it.amount,
+            it.unit,
+            it.money,
+            it.category.sub_category if it.category_id else '',
+        )
+        for it in ReceiptItem.objects.filter(user=user).select_related('category').iterator()
     ]
     giftcards = [
         _giftcard_fp(g.row_number, g.id, g.shop, g.date, g.balance)
@@ -798,11 +810,19 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
         )
 
     for i, row in enumerate(source['receipt_items']):
-        item_id, rid, name, amount, unit, money = _parse_item_row(row, i)
+        item_id, rid, name, amount, unit, money, sub_category = _parse_item_row(row, i)
         if rid not in seen_receipt_ids:
             raise SyncError(
                 f'Receipt item row {i + 1}: Receipt ID {rid} not found in Receipt table'
             )
+        category_id = None
+        if sub_category:
+            category_id = category_by_sub.get(sub_category)
+            if category_id is None:
+                raise SyncError(
+                    f'Receipt item row {i + 1}: Sub category {sub_category!r} '
+                    f'not found (add it to Category first)'
+                )
         item_objs.append(
             ReceiptItem(
                 id=item_id,
@@ -813,6 +833,7 @@ def sync_from_sheets(client: SheetsClient, *, user: User) -> dict:
                 amount=amount,
                 unit=unit,
                 money=money,
+                category_id=category_id,
             )
         )
 

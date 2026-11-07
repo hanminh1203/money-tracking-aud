@@ -8,9 +8,9 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db.models import Case, DecimalField, F, Q, QuerySet, Sum, Value, When
-from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
+from finance.category_split import allocate_change
 from finance.comment_parse import parse_store_comment
 from finance.models import (
     Category,
@@ -25,7 +25,7 @@ from finance.models import (
     Transaction,
     User,
 )
-from finance.sheets_client import TRANSFER_SUB_CATEGORY
+from finance.sheets_client import RECEIPT_ITEM_COLUMNS, TRANSFER_SUB_CATEGORY
 
 TRANSACTION_HEADERS = [
     'Transaction ID',
@@ -45,14 +45,7 @@ GIFTCARD_PAYMENT_EXPORT_COLUMNS = [
 CATEGORY_EXPORT_COLUMNS = ['Main Category', 'Sub category', 'Type']
 SOURCES_EXPORT_COLUMNS = ['Name', 'Type']
 RECEIPT_EXPORT_COLUMNS = ['Receipt ID', 'Transaction ID', 'Date', 'Total']
-RECEIPT_ITEM_EXPORT_COLUMNS = [
-    'Receipt Item ID',
-    'Receipt ID',
-    'Name',
-    'Amount',
-    'Unit',
-    'Money',
-]
+RECEIPT_ITEM_EXPORT_COLUMNS = list(RECEIPT_ITEM_COLUMNS)
 GIFTCARD_EXPORT_COLUMNS = ['Giftcard ID', 'Shop', 'Date', 'Balance']
 PRODUCT_EXPORT_COLUMNS = ['Product ID', 'Name']
 PRODUCT_ITEM_EXPORT_COLUMNS = [
@@ -187,6 +180,7 @@ def _receipt_items(receipt: Receipt, *, user: User | None = None) -> list[dict]:
             'amount': _dec_to_number(it.amount),
             'unit': it.unit,
             'money': _dec_to_number(it.money),
+            'subCategory': it.category.sub_category if it.category_id else '',
             **product_by_receipt_item.get(str(it.id), {}),
         }
         for it in items
@@ -317,6 +311,60 @@ def _cash_ledger_total(*, user: User) -> Decimal:
     return total or Decimal('0')
 
 
+def _monthly_subcategory_breakdown(
+    *,
+    user: User,
+    first_month: date,
+    next_month: date,
+    months: list[str],
+) -> dict[str, dict[str, dict[str, Decimal]]]:
+    """Allocate each Income/Expense change across receipt-item subcategories.
+
+    Transactions with no receipt (transfers, giftcard buys, and any row that
+    never received a receipt) keep the whole change on the transaction
+    subcategory. See ``category_split.allocate_change``.
+    """
+    breakdown: dict[str, dict[str, dict[str, Decimal]]] = {'Income': {}, 'Expense': {}}
+    queryset = (
+        Transaction.objects.filter(
+            user=user,
+            date__gte=first_month,
+            date__lt=next_month,
+            category__type__in=('Income', 'Expense'),
+        )
+        .select_related('category', 'receipt')
+        .prefetch_related('receipt__items__category')
+    )
+    for tx in queryset:
+        receipt = _linked_receipt(tx)
+        items: list[dict] = []
+        if receipt is not None:
+            for item in receipt.items.all():
+                category = item.category if item.category_id else None
+                items.append(
+                    {
+                        'money': item.money,
+                        'sub_category': category.sub_category if category else '',
+                        'category_type': category.type if category else '',
+                    }
+                )
+        month_key = f'{tx.date.year}/{tx.date.month:02d}'
+        if month_key not in months:
+            continue
+        for category_type, sub_category, amount in allocate_change(
+            change=tx.change,
+            transaction_sub_category=tx.category.sub_category if tx.category_id else '',
+            transaction_type=tx.category.type if tx.category_id else '',
+            items=items,
+        ):
+            values = breakdown[category_type].setdefault(
+                sub_category,
+                {month: Decimal('0') for month in months},
+            )
+            values[month_key] += amount
+    return breakdown
+
+
 def get_dashboard_data(*, user: User) -> dict:
     """Return all dashboard metrics, breakdowns, and current-month rows.
 
@@ -334,7 +382,6 @@ def get_dashboard_data(*, user: User) -> dict:
     months = [f'{value.year}/{value.month:02d}' for value in month_dates]
 
     zero = Value(0, output_field=DecimalField(max_digits=14, decimal_places=2))
-    user_txs = Transaction.objects.filter(user=user)
     current_qs = _tx_queryset(user=user).filter(
         date__gte=current_month,
         date__lt=next_month,
@@ -363,35 +410,19 @@ def get_dashboard_data(*, user: User) -> dict:
     )['total'] or Decimal('0')
     net_worth = cash_total + giftcard_total
 
-    breakdown_rows = (
-        user_txs.filter(
-            date__gte=first_month,
-            date__lt=next_month,
-            category__type__in=('Income', 'Expense'),
-        )
-        .annotate(month=TruncMonth('date'))
-        .values('category__type', 'category__sub_category', 'month')
-        .annotate(amount=Sum('change'))
-        .order_by('category__type', 'category__sub_category', 'month')
+    breakdown = _monthly_subcategory_breakdown(
+        user=user,
+        first_month=first_month,
+        next_month=next_month,
+        months=months,
     )
-
-    breakdown = {'Income': {}, 'Expense': {}}
-    for row in breakdown_rows:
-        category_type = row['category__type']
-        sub_category = row['category__sub_category']
-        month_date = row['month']
-        if category_type not in breakdown or not sub_category or month_date is None:
-            continue
-        values = breakdown[category_type].setdefault(
-            sub_category,
-            {month: 0.0 for month in months},
-        )
-        month_key = f'{month_date.year}/{month_date.month:02d}'
-        values[month_key] = _dec_to_number(row['amount'] or Decimal('0'))
 
     def pivot_rows(category_type: str) -> list[dict]:
         return [
-            {'subCategory': name, 'amounts': values}
+            {
+                'subCategory': name,
+                'amounts': {month: _dec_to_number(values[month]) for month in months},
+            }
             for name, values in sorted(breakdown[category_type].items())
         ]
 
@@ -425,7 +456,7 @@ def get_receipt(*, user: User, receipt_id: str) -> dict:
             Receipt.objects.filter(user=user)
             .select_related('transaction', 'transaction__category')
             .prefetch_related(
-                'items',
+                'items__category',
                 'transaction__payments__source',
                 'transaction__giftcard_payments__giftcard',
             )
@@ -481,7 +512,7 @@ def get_transaction(*, user: User, transaction_id: str) -> dict:
     try:
         tx = (
             _tx_queryset(user=user)
-            .prefetch_related('receipt__items')
+            .prefetch_related('receipt__items__category')
             .get(pk=tid)
         )
     except (Transaction.DoesNotExist, ValueError, ValidationError) as exc:
@@ -853,8 +884,10 @@ def get_export_payload(*, user: User) -> dict[str, dict]:
             _dec_cell(it.amount),
             it.unit or '',
             _dec_cell(it.money),
+            it.category.sub_category if it.category_id else '',
         ]
         for it in ReceiptItem.objects.filter(user=user)
+        .select_related('category')
         .order_by('receipt_id', 'id')
         .iterator()
     ]

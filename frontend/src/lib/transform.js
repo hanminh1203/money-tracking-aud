@@ -65,7 +65,32 @@ export function isAutoReceipt(tx) {
   if (!Number.isFinite(money) || money <= 0) return false;
   const itemMoney = Math.abs(Number(item?.money));
   const total = Math.abs(Number(receipt.total));
-  return Math.abs(itemMoney - money) < 0.009 && Math.abs(total - money) < 0.009;
+  if (!(Math.abs(itemMoney - money) < 0.009 && Math.abs(total - money) < 0.009)) return false;
+  // A line that already has its own subcategory is no longer rewritten from the transaction.
+  const itemSub = String(item?.subCategory || '').trim();
+  const txSub = String(tx?.subCategory || '').trim();
+  if (itemSub && txSub && itemSub !== txSub) return false;
+  return true;
+}
+
+/** Item subcategory, or the transaction subcategory when the item has none. */
+export function itemSubCategoryOrDefault(itemSub, transactionSub) {
+  const item = String(itemSub || '').trim();
+  return item || String(transactionSub || '').trim();
+}
+
+/**
+ * When the transaction subcategory changes, lines still using the previous
+ * default (or blank) follow it. A line the user set to something else stays.
+ */
+export function nextItemsAfterSubCategoryChange(items, previous, next) {
+  const prev = String(previous || '').trim();
+  const value = String(next || '').trim();
+  return (items || []).map((it) => {
+    const current = String(it?.subCategory || '').trim();
+    if (!current || current === prev) return { ...it, subCategory: value };
+    return it;
+  });
 }
 
 export function localDateIso(date = new Date()) {

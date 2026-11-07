@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isAutoReceipt, localDateIso } from './transform.js';
+import {
+  isAutoReceipt,
+  itemSubCategoryOrDefault,
+  localDateIso,
+  nextItemsAfterSubCategoryChange,
+} from './transform.js';
 
 test('isAutoReceipt matches a single 1 piece line named from the description', () => {
   const tx = {
@@ -35,6 +40,60 @@ test('isAutoReceipt matches a single 1 piece line named from the description', (
       },
     }),
     false
+  );
+});
+
+test('isAutoReceipt stops once the line subcategory differs from the transaction', () => {
+  const tx = {
+    comment: 'Milk',
+    change: -4.5,
+    subCategory: 'Groceries',
+    receipt: {
+      total: 4.5,
+      items: [{ name: 'Milk', amount: 1, unit: 'piece', money: 4.5, subCategory: 'Groceries' }],
+    },
+  };
+  assert.equal(isAutoReceipt(tx), true);
+  assert.equal(
+    isAutoReceipt({
+      ...tx,
+      receipt: {
+        total: 4.5,
+        items: [{ name: 'Milk', amount: 1, unit: 'piece', money: 4.5, subCategory: '' }],
+      },
+    }),
+    true
+  );
+  assert.equal(
+    isAutoReceipt({
+      ...tx,
+      receipt: {
+        total: 4.5,
+        items: [{ name: 'Milk', amount: 1, unit: 'piece', money: 4.5, subCategory: 'Household' }],
+      },
+    }),
+    false
+  );
+});
+
+test('item subcategory defaults follow the transaction until a line is set', () => {
+  assert.equal(itemSubCategoryOrDefault('', 'Groceries'), 'Groceries');
+  assert.equal(itemSubCategoryOrDefault('Rent', 'Groceries'), 'Rent');
+  assert.deepEqual(
+    nextItemsAfterSubCategoryChange(
+      [
+        { name: 'Milk', subCategory: 'Groceries' },
+        { name: 'Soap', subCategory: 'Household' },
+        { name: 'Bag', subCategory: '' },
+      ],
+      'Groceries',
+      'Rent'
+    ),
+    [
+      { name: 'Milk', subCategory: 'Rent' },
+      { name: 'Soap', subCategory: 'Household' },
+      { name: 'Bag', subCategory: 'Rent' },
+    ]
   );
 });
 

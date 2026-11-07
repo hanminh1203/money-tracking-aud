@@ -80,6 +80,7 @@ def _receipt_item_kwargs(
         unit=str(it['unit']),
         money=it['money'],
     )
+    sub_category = str(it.get('sub_category') or it.get('subCategory') or '')
     return {
         'id': item_id,
         'version': 1,
@@ -89,6 +90,7 @@ def _receipt_item_kwargs(
         'amount': _dec(it['amount']),
         'unit': str(it['unit']),
         'money': _dec(it['money']),
+        'category_id': _resolve_category_id(sub_category, user=owner),
     }
 
 
@@ -137,6 +139,7 @@ def reconcile_receipt_items(
                 'amount': it['amount'],
                 'unit': str(it['unit']),
                 'money': it['money'],
+                'sub_category': str(it.get('sub_category') or it.get('subCategory') or '').strip(),
             }
         )
 
@@ -199,6 +202,7 @@ def reconcile_receipt_items(
                 'amount': it['amount'],
                 'unit': it['unit'],
                 'money': it['money'],
+                'sub_category': it.get('sub_category') or '',
             }
         )
 
@@ -236,17 +240,20 @@ def _sync_receipt_items(
         new_amount = kwargs['amount']
         new_unit = kwargs['unit']
         new_money = kwargs['money']
+        new_category_id = kwargs['category_id']
         if (
             obj.name == new_name
             and obj.amount == new_amount
             and obj.unit == new_unit
             and obj.money == new_money
+            and obj.category_id == new_category_id
         ):
             continue
         obj.name = new_name
         obj.amount = new_amount
         obj.unit = new_unit
         obj.money = new_money
+        obj.category_id = new_category_id
         obj.version = (obj.version or 1) + 1
         to_update.append(obj)
 
@@ -254,7 +261,7 @@ def _sync_receipt_items(
         ReceiptItem.objects.bulk_create(to_create)
     if to_update:
         ReceiptItem.objects.bulk_update(
-            to_update, ['name', 'amount', 'unit', 'money', 'version']
+            to_update, ['name', 'amount', 'unit', 'money', 'category_id', 'version']
         )
     stale_ids = [obj.id for obj in existing if obj.id not in keep_ids]
     if stale_ids:
@@ -703,40 +710,6 @@ def save_giftcard_use(
                 _insert_receipt(owner=owner, transaction_id=tid, receipt=receipt)
     except Exception as exc:
         logger.exception('Postgres dual-write failed for giftcard use %s', giftcard_id)
-        raise DualWriteError() from exc
-
-
-def save_receipt_for_existing_transaction(
-    *,
-    user: User,
-    transaction: Transaction,
-    receipt: dict,
-    comment: str | None = None,
-) -> None:
-    """Attach a receipt that was already written to the sheet.
-
-    ``comment`` replaces a blank description (the backfill placeholder). A
-    transaction that already has a receipt is left unchanged so a re-run does
-    not insert a second line.
-    """
-    owner = _require_user(user)
-    try:
-        with db_transaction.atomic():
-            locked = Transaction.objects.select_for_update().get(
-                pk=transaction.id, user=owner
-            )
-            if comment is not None and locked.comment != comment:
-                locked.comment = comment
-                locked.version = (locked.version or 1) + 1
-                locked.save(update_fields=['comment', 'version'])
-            if Receipt.objects.filter(transaction=locked, user=owner).exists():
-                return
-            _insert_receipt(owner=owner, transaction_id=locked.id, receipt=receipt)
-    except Exception as exc:
-        logger.exception(
-            'Postgres dual-write failed attaching receipt to transaction %s',
-            transaction.id,
-        )
         raise DualWriteError() from exc
 
 
